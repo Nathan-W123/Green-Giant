@@ -1,0 +1,160 @@
+/* ============================================================
+   Canvas overlay — injected into the YouTube page DOM
+   ============================================================ */
+
+#eco-upscaler-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10; /* above video container (0-1), below YouTube controls (19+), within #movie_player context */
+  image-rendering: pixelated;
+}
+
+/* ============================================================
+   Extension popup — popup.html
+   ============================================================ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+.popup-body {
+  width: 260px;
+  background: #111;
+  color: #e5e5e5;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  padding: 0 0 8px;
+}
+
+.popup-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid #222;
+}
+
+.popup-icon {
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.popup-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: 0.2px;
+}
+
+.popup-section {
+  padding: 10px 14px 4px;
+}
+
+.popup-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid #1e1e1e;
+}
+
+.popup-row:last-child {
+  border-bottom: none;
+}
+
+.popup-label {
+  color: #aaa;
+  font-size: 12px;
+}
+
+/* Toggle switch */
+.popup-switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.popup-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.popup-slider {
+  position: absolute;
+  inset: 0;
+  background: #444;
+  border-radius: 20px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.popup-slider::before {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 3px;
+  top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+
+.popup-switch input:checked + .popup-slider {
+  background: #4ade80;
+}
+
+.popup-switch input:checked + .popup-slider::before {
+  transform: translateX(16px);
+}
+
+/* Mode select */
+.popup-select {
+  background: #222;
+  color: #e5e5e5;
+  border: 1px solid #444;
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+}
+
+.popup-select:focus {
+  border-color: #4ade80;
+}
+
+/* Status badge */
+.popup-status-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 20px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  background: #333;
+  color: #888;
+}
+
+.popup-status-badge.active   { background: #14532d; color: #4ade80; }
+.popup-status-badge.degraded { background: #7c2d12; color: #fb923c; }
+.popup-status-badge.fallback { background: #7c2d12; color: #fb923c; }
+.popup-status-badge.disabled { background: #450a0a; color: #f87171; }
+.popup-status-badge.off      { background: #1a1a1a; color: #555; }
+
+/* Hint text shown when not on a watch page */
+.popup-hint {
+  font-size: 11px;
+  color: #555;
+  text-align: center;
+  padding: 8px 14px 4px;
+  line-height: 1.4;
+}

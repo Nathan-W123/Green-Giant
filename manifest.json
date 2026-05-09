@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Eco Upscaler",
+  "version": "0.1.0",
+  "description": "Lightweight natural video enhancement for YouTube. Watch 1080p, see closer to 4K.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://www.youtube.com/*"],
+  "minimum_chrome_version": "88",
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["content.bundle.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "YouTube Eco Upscaler"
+  },
+  "web_accessible_resources": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "resources": ["icons/*.png"]
+    }
+  ]
+}

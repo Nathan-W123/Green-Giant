@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Eco Upscaler</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="popup-body">
+  <div class="popup-header">
+    <img src="icons/icon48.png" alt="" width="22" height="22" class="popup-icon">
+    <span class="popup-title">Eco Upscaler</span>
+  </div>
+
+  <div class="popup-section">
+    <div class="popup-row">
+      <label class="popup-label" for="popup-toggle">Enhancement</label>
+      <label class="popup-switch">
+        <input type="checkbox" id="popup-toggle">
+        <span class="popup-slider"></span>
+      </label>
+    </div>
+
+    <div class="popup-row">
+      <label class="popup-label" for="popup-mode">Mode</label>
+      <select id="popup-mode" class="popup-select">
+        <option value="smooth">Smooth</option>
+        <option value="balanced" selected>Balanced</option>
+        <option value="sharp">Sharp</option>
+      </select>
+    </div>
+
+    <div class="popup-row">
+      <span class="popup-label">Status</span>
+      <span id="popup-status" class="popup-status-badge">—</span>
+    </div>
+  </div>
+
+  <p id="popup-hint" class="popup-hint">Open a YouTube video to activate.</p>
+
+  <script src="popup.js"></script>
+</body>
+</html>

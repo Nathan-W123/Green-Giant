@@ -1,0 +1,20 @@
+{
+  "name": "hackdavis",
+  "version": "1.0.0",
+  "description": "",
+  "main": "content.js",
+  "scripts": {
+    "build": "esbuild content.js --bundle --format=iife --outfile=content.bundle.js",
+    "watch": "esbuild content.js --bundle --format=iife --outfile=content.bundle.js --watch"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "anime4k-webgpu": "^1.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
+  }
+}
