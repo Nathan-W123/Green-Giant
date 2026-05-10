@@ -80,6 +80,10 @@ export class AITileUpscaler {
       width: '100%', height: '100%',
       pointerEvents: 'none',
       zIndex:        '51',
+      // 'overlay' blend: neutral gray (128) has zero effect on pixels below;
+      // values above/below 128 sharpen edges. This lets the WebGL canvas show
+      // through at 60 fps — only the AI delta is composited on top at 4 fps.
+      mixBlendMode:  'overlay',
     });
     this._container.appendChild(canvas);
     this._canvas = canvas;
@@ -103,29 +107,22 @@ export class AITileUpscaler {
     const H = this._canvas.height;
     const N = MODEL_IN;
 
-    // ── Pass 1: Full-resolution base draw ────────────────────────────────────
-    // Draw video at native canvas resolution so the AI overlay looks as good
-    // as the WebGL canvas it covers. GPU-accelerated, negligible CPU cost.
-    this._ctx.imageSmoothingEnabled = true;
-    this._ctx.imageSmoothingQuality = 'high';
-    this._ctx.drawImage(video, 0, 0, W, H);
-
-    // ── Pass 2: USM delta at MODEL_IN, blended as overlay ────────────────────
-    // Compute luma-space Gaussian unsharp mask at 224×224, encode the delta
-    // as deviations from neutral gray (128). Blend with 'overlay' composite:
-    // neutral gray (=128) has zero effect; values above/below 128 boost/reduce
-    // local contrast at edges, leaving flat areas untouched.
+    // Compute luma-space Gaussian USM delta at MODEL_IN×MODEL_IN.
+    // Encode as deviations from neutral gray (128): flat areas stay at 128
+    // (zero effect under overlay blend), edge pixels rise/fall to sharpen.
+    // The WebGL canvas below is always visible at 60 fps through this canvas
+    // because mix-blend-mode:overlay makes the near-128 areas transparent.
     this._scratch.width  = N;
     this._scratch.height = N;
     this._sctx.drawImage(video, 0, 0, N, N);
     const src = this._sctx.getImageData(0, 0, N, N).data;
 
     const out = new Uint8ClampedArray(N * N * 4);
-    const USM_STRENGTH = 0.7;
+    const USM_STRENGTH = 1.4; // stronger than before — now purely additive
 
     for (let y = 0; y < N; y++) {
       for (let x = 0; x < N; x++) {
-        const i  = (y * N + x) * 4;
+        const i     = (y * N + x) * 4;
         const origY = 0.299 * src[i] + 0.587 * src[i + 1] + 0.114 * src[i + 2];
 
         let blurY = 0, k = 0;
@@ -143,11 +140,12 @@ export class AITileUpscaler {
       }
     }
 
+    // Draw delta to scratch, then scale to full canvas. The CSS overlay blend
+    // mode composites this with the WebGL canvas below — no need to draw the
+    // video here, which was causing the 4 fps stale-frame appearance.
     this._sctx.putImageData(new ImageData(out, N, N), 0, 0);
-    this._ctx.globalCompositeOperation = 'overlay';
-    this._ctx.globalAlpha = 0.45;
+    this._ctx.imageSmoothingEnabled = true;
+    this._ctx.imageSmoothingQuality = 'high';
     this._ctx.drawImage(this._scratch, 0, 0, W, H);
-    this._ctx.globalCompositeOperation = 'source-over';
-    this._ctx.globalAlpha = 1;
   }
 }

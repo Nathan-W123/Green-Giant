@@ -349,7 +349,11 @@
         width: "100%",
         height: "100%",
         pointerEvents: "none",
-        zIndex: "51"
+        zIndex: "51",
+        // 'overlay' blend: neutral gray (128) has zero effect on pixels below;
+        // values above/below 128 sharpen edges. This lets the WebGL canvas show
+        // through at 60 fps — only the AI delta is composited on top at 4 fps.
+        mixBlendMode: "overlay"
       });
       this._container.appendChild(canvas);
       this._canvas = canvas;
@@ -370,15 +374,12 @@
       const W = this._canvas.width;
       const H = this._canvas.height;
       const N = MODEL_IN;
-      this._ctx.imageSmoothingEnabled = true;
-      this._ctx.imageSmoothingQuality = "high";
-      this._ctx.drawImage(video, 0, 0, W, H);
       this._scratch.width = N;
       this._scratch.height = N;
       this._sctx.drawImage(video, 0, 0, N, N);
       const src = this._sctx.getImageData(0, 0, N, N).data;
       const out = new Uint8ClampedArray(N * N * 4);
-      const USM_STRENGTH = 0.7;
+      const USM_STRENGTH = 1.4;
       for (let y = 0; y < N; y++) {
         for (let x = 0; x < N; x++) {
           const i = (y * N + x) * 4;
@@ -400,11 +401,9 @@
         }
       }
       this._sctx.putImageData(new ImageData(out, N, N), 0, 0);
-      this._ctx.globalCompositeOperation = "overlay";
-      this._ctx.globalAlpha = 0.45;
+      this._ctx.imageSmoothingEnabled = true;
+      this._ctx.imageSmoothingQuality = "high";
       this._ctx.drawImage(this._scratch, 0, 0, W, H);
-      this._ctx.globalCompositeOperation = "source-over";
-      this._ctx.globalAlpha = 1;
     }
   };
 
