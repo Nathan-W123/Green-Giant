@@ -843,6 +843,113 @@
     const h = heights.find((t) => height >= t) ?? 360;
     return _YT_BITRATE[h]?.[fps > 35 ? 60 : 30] ?? 5;
   }
+  var _CO2_BY_ZONE = {
+    "America/New_York": 380,
+    "America/Chicago": 420,
+    "America/Denver": 350,
+    "America/Los_Angeles": 210,
+    "America/Phoenix": 400,
+    "America/Toronto": 130,
+    "America/Vancouver": 25,
+    "America/Sao_Paulo": 100,
+    "America/Mexico_City": 450,
+    "America/Lima": 290,
+    "America/Bogota": 200,
+    "America/Santiago": 240,
+    "America/Buenos_Aires": 380,
+    "Europe/London": 180,
+    "Europe/Paris": 70,
+    "Europe/Berlin": 360,
+    "Europe/Amsterdam": 290,
+    "Europe/Madrid": 160,
+    "Europe/Rome": 230,
+    "Europe/Warsaw": 650,
+    "Europe/Stockholm": 40,
+    "Europe/Oslo": 30,
+    "Europe/Zurich": 90,
+    "Europe/Helsinki": 90,
+    "Europe/Vienna": 180,
+    "Europe/Brussels": 150,
+    "Europe/Copenhagen": 160,
+    "Europe/Dublin": 280,
+    "Europe/Lisbon": 170,
+    "Europe/Prague": 430,
+    "Europe/Budapest": 250,
+    "Europe/Bucharest": 290,
+    "Europe/Athens": 320,
+    "Europe/Istanbul": 420,
+    "Asia/Tokyo": 460,
+    "Asia/Shanghai": 580,
+    "Asia/Seoul": 400,
+    "Asia/Kolkata": 640,
+    "Asia/Singapore": 380,
+    "Asia/Dubai": 400,
+    "Asia/Hong_Kong": 580,
+    "Asia/Taipei": 480,
+    "Asia/Bangkok": 520,
+    "Asia/Jakarta": 700,
+    "Asia/Karachi": 380,
+    "Asia/Dhaka": 540,
+    "Australia/Sydney": 620,
+    "Australia/Melbourne": 620,
+    "Australia/Brisbane": 690,
+    "Australia/Perth": 620,
+    "Australia/Adelaide": 480,
+    "Pacific/Auckland": 130,
+    "Pacific/Honolulu": 700,
+    "Africa/Johannesburg": 700,
+    "Africa/Cairo": 460,
+    "Africa/Lagos": 480,
+    "Africa/Nairobi": 200
+  };
+  var _CO2_REGIONAL_AVG = {
+    America: 350,
+    Europe: 250,
+    Asia: 500,
+    Africa: 580,
+    Australia: 620,
+    Pacific: 400,
+    Indian: 450,
+    Atlantic: 350
+  };
+  var _CO2_GLOBAL_AVG = 450;
+  function _getCarbonIntensity() {
+    try {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const exact = _CO2_BY_ZONE[tz];
+      if (exact !== void 0) return exact;
+      return _CO2_REGIONAL_AVG[tz.split("/")[0]] ?? _CO2_GLOBAL_AVG;
+    } catch {
+      return _CO2_GLOBAL_AVG;
+    }
+  }
+  var _YT_QUALITY_HEIGHT = {
+    highres: 4320,
+    hd2160: 2160,
+    hd1440: 1440,
+    hd1080: 1080,
+    hd720: 720,
+    large: 480,
+    medium: 360,
+    small: 240,
+    tiny: 144
+  };
+  function _getMaxAvailableHeight() {
+    try {
+      const player = document.querySelector("#movie_player");
+      const levels = player?.getAvailableQualityLevels?.();
+      if (Array.isArray(levels) && levels.length > 0) {
+        let max = 0;
+        for (const l of levels) {
+          const h = _YT_QUALITY_HEIGHT[l];
+          if (h && h > max) max = h;
+        }
+        if (max > 0) return Math.min(max, 2160);
+      }
+    } catch {
+    }
+    return 2160;
+  }
   var EnergyTracker = class {
     constructor() {
       this._startMs = null;
@@ -856,6 +963,8 @@
       this._lastFrameMs = null;
       this._lastDecodedBytes = null;
       this._lastDecodedBytesMs = null;
+      this._carbonIntensity = _getCarbonIntensity();
+      this._referenceHeight = 2160;
     }
     async load() {
       return new Promise((resolve) => {
@@ -896,15 +1005,26 @@
       this._lastFrameMs = null;
       this._lastDecodedBytes = null;
       this._lastDecodedBytesMs = null;
+      this._referenceHeight = 2160;
     }
-    // Returns a two-line display string: current rate + lifetime total.
+    // Returns a display string: rate line + lifetime line (newline-separated).
     formatDisplay() {
       const total = this._totalWh;
       const rate = this._currentRate;
-      const totalStr = total < 0.05 ? null : total < 1e3 ? `${total.toFixed(1)} Wh saved` : `${(total / 1e3).toFixed(3)} kWh saved`;
-      const rateStr = rate >= 0.1 ? `~${rate.toFixed(1)} Wh/hr vs 4K` : null;
-      if (!totalStr && !rateStr) return "";
-      if (rateStr && totalStr) return `\u2193 ${rateStr} \xB7 ${totalStr} lifetime`;
+      const ci = this._carbonIntensity;
+      const refLabel = this._referenceHeight >= 2160 ? "4K" : `${this._referenceHeight}p`;
+      const co2RateG = rate * ci / 1e3;
+      const co2TotalG = total * ci / 1e3;
+      const rateStr = rate >= 0.1 ? `~${rate.toFixed(1)} Wh/hr \xB7 ~${co2RateG.toFixed(0)}g CO\u2082/hr vs ${refLabel}` : null;
+      let totalStr = null;
+      if (total >= 0.05) {
+        const whStr = total < 1e3 ? `${total.toFixed(1)} Wh` : `${(total / 1e3).toFixed(2)} kWh`;
+        const co2Str = co2TotalG < 1e3 ? `${co2TotalG.toFixed(0)}g CO\u2082` : `${(co2TotalG / 1e3).toFixed(2)}kg CO\u2082`;
+        totalStr = `${whStr} \xB7 ${co2Str} saved`;
+      }
+      if (!rateStr && !totalStr) return "";
+      if (rateStr && totalStr) return `\u2193 ${rateStr}
+${totalStr} lifetime`;
       return totalStr ?? rateStr;
     }
     _tick() {
@@ -924,8 +1044,10 @@
       const fps = this._measureFPS();
       const measuredMbps = this._measureActualBitrateMbps();
       const streamMbps = measuredMbps !== null ? measuredMbps : _ytBitrate(height, fps);
-      const fourKMbps = _ytBitrate(2160, fps);
-      const deltaMbps = Math.max(0, fourKMbps - streamMbps);
+      const maxHeight = _getMaxAvailableHeight();
+      this._referenceHeight = maxHeight;
+      const ceilingMbps = _ytBitrate(maxHeight, fps);
+      const deltaMbps = Math.max(0, ceilingMbps - streamMbps);
       const gbSaved = deltaMbps * 0.45 * hrs;
       const networkWh = gbSaved * _whPerGb(connType, effectiveType);
       const srcPx = (this._video.videoWidth || Math.round(height * 16 / 9)) * (this._video.videoHeight || height);
@@ -1079,6 +1201,7 @@
           opacity: 0.75;
           margin-top: 4px;
           line-height: 1.4;
+          white-space: pre-line;
         }
       </style>
       <div id="panel">

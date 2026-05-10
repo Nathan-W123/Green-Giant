@@ -451,14 +451,15 @@ class BackgroundQualityManager {
 // Each tick takes real measurements and computes Wh saved for that interval:
 //
 //   streamMbps  = video.webkitVideoDecodedByteCount diff (actual) OR table fallback
-//   fourKMbps   = table lookup (counterfactual — what 4K would cost)
-//   gbSaved     = (fourKMbps - streamMbps) × 0.45 GB/Mbps/hr × intervalHrs
+//   ceilingMbps = table lookup for highest quality YouTube offered (getAvailableQualityLevels)
+//   gbSaved     = (ceilingMbps - streamMbps) × 0.45 GB/Mbps/hr × intervalHrs
 //   networkWh   = gbSaved × _whPerGb(connection.type, connection.effectiveType)
 //   deviceWh    = _MAX_DECODE_W × (1 - srcPixels / _PX_4K) × intervalHrs
 //   totalWh     = networkWh + deviceWh
+//   co2g        = totalWh × _getCarbonIntensity() / 1000
 //
-// Energy-per-GB sources: IEA 2024 (fixed networks) + Malmodin & Lundén 2020
-// (mobile vs fixed ratio). Values represent marginal CDN+backbone+last-mile cost.
+// Sources: IEA 2024 (fixed networks), Malmodin & Lundén 2020 (mobile ratio),
+//          IEA 2022 grid carbon intensity by country.
 // ============================================================================
 
 // YouTube VP9/AV1 average bitrates (Mbps) by resolution + framerate tier.
@@ -505,6 +506,70 @@ function _ytBitrate(height, fps) {
   return _YT_BITRATE[h]?.[fps > 35 ? 60 : 30] ?? 5;
 }
 
+// ── Grid carbon intensity by IANA timezone (IEA 2022 annual avg gCO2/kWh) ────
+const _CO2_BY_ZONE = {
+  'America/New_York': 380,  'America/Chicago': 420,    'America/Denver': 350,
+  'America/Los_Angeles': 210, 'America/Phoenix': 400,  'America/Toronto': 130,
+  'America/Vancouver': 25,  'America/Sao_Paulo': 100,  'America/Mexico_City': 450,
+  'America/Lima': 290,      'America/Bogota': 200,      'America/Santiago': 240,
+  'America/Buenos_Aires': 380,
+  'Europe/London': 180,     'Europe/Paris': 70,         'Europe/Berlin': 360,
+  'Europe/Amsterdam': 290,  'Europe/Madrid': 160,       'Europe/Rome': 230,
+  'Europe/Warsaw': 650,     'Europe/Stockholm': 40,     'Europe/Oslo': 30,
+  'Europe/Zurich': 90,      'Europe/Helsinki': 90,      'Europe/Vienna': 180,
+  'Europe/Brussels': 150,   'Europe/Copenhagen': 160,   'Europe/Dublin': 280,
+  'Europe/Lisbon': 170,     'Europe/Prague': 430,       'Europe/Budapest': 250,
+  'Europe/Bucharest': 290,  'Europe/Athens': 320,       'Europe/Istanbul': 420,
+  'Asia/Tokyo': 460,        'Asia/Shanghai': 580,       'Asia/Seoul': 400,
+  'Asia/Kolkata': 640,      'Asia/Singapore': 380,      'Asia/Dubai': 400,
+  'Asia/Hong_Kong': 580,    'Asia/Taipei': 480,         'Asia/Bangkok': 520,
+  'Asia/Jakarta': 700,      'Asia/Karachi': 380,        'Asia/Dhaka': 540,
+  'Australia/Sydney': 620,  'Australia/Melbourne': 620, 'Australia/Brisbane': 690,
+  'Australia/Perth': 620,   'Australia/Adelaide': 480,
+  'Pacific/Auckland': 130,  'Pacific/Honolulu': 700,
+  'Africa/Johannesburg': 700, 'Africa/Cairo': 460,      'Africa/Lagos': 480,
+  'Africa/Nairobi': 200,
+};
+const _CO2_REGIONAL_AVG = {
+  America: 350, Europe: 250, Asia: 500, Africa: 580,
+  Australia: 620, Pacific: 400, Indian: 450, Atlantic: 350,
+};
+const _CO2_GLOBAL_AVG = 450;
+
+function _getCarbonIntensity() {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const exact = _CO2_BY_ZONE[tz];
+    if (exact !== undefined) return exact;
+    return _CO2_REGIONAL_AVG[tz.split('/')[0]] ?? _CO2_GLOBAL_AVG;
+  } catch { return _CO2_GLOBAL_AVG; }
+}
+
+// YouTube player quality label → display height in pixels.
+const _YT_QUALITY_HEIGHT = {
+  highres: 4320, hd2160: 2160, hd1440: 1440,
+  hd1080: 1080,  hd720: 720,   large: 480,
+  medium: 360,   small: 240,   tiny: 144,
+};
+
+// Returns the tallest quality YouTube offered for this video (capped at 2160).
+// If the player API is unavailable, assumes 4K was available (conservative).
+function _getMaxAvailableHeight() {
+  try {
+    const player = document.querySelector('#movie_player');
+    const levels = player?.getAvailableQualityLevels?.();
+    if (Array.isArray(levels) && levels.length > 0) {
+      let max = 0;
+      for (const l of levels) {
+        const h = _YT_QUALITY_HEIGHT[l];
+        if (h && h > max) max = h;
+      }
+      if (max > 0) return Math.min(max, 2160);
+    }
+  } catch { /* player not ready */ }
+  return 2160;
+}
+
 class EnergyTracker {
   constructor() {
     this._startMs          = null;
@@ -518,8 +583,12 @@ class EnergyTracker {
     this._lastFrames       = null;
     this._lastFrameMs      = null;
     // Actual bitrate measurement via webkitVideoDecodedByteCount
-    this._lastDecodedBytes = null;
+    this._lastDecodedBytes   = null;
     this._lastDecodedBytesMs = null;
+    // Carbon intensity for this session (gCO2/kWh) derived from timezone
+    this._carbonIntensity  = _getCarbonIntensity();
+    // Highest quality YouTube offered — updated each flush
+    this._referenceHeight  = 2160;
   }
 
   async load() {
@@ -559,18 +628,35 @@ class EnergyTracker {
     this._lastFrameMs        = null;
     this._lastDecodedBytes   = null;
     this._lastDecodedBytesMs = null;
+    this._referenceHeight    = 2160;
   }
 
-  // Returns a two-line display string: current rate + lifetime total.
+  // Returns a display string: rate line + lifetime line (newline-separated).
   formatDisplay() {
-    const total = this._totalWh;
-    const rate  = this._currentRate;
-    const totalStr = total < 0.05 ? null
-      : total < 1000 ? `${total.toFixed(1)} Wh saved`
-      : `${(total / 1000).toFixed(3)} kWh saved`;
-    const rateStr = rate >= 0.1 ? `~${rate.toFixed(1)} Wh/hr vs 4K` : null;
-    if (!totalStr && !rateStr) return '';
-    if (rateStr && totalStr) return `↓ ${rateStr} · ${totalStr} lifetime`;
+    const total    = this._totalWh;
+    const rate     = this._currentRate;
+    const ci       = this._carbonIntensity;        // gCO2/kWh
+    const refLabel = this._referenceHeight >= 2160 ? '4K' : `${this._referenceHeight}p`;
+
+    // CO2 conversions
+    const co2RateG  = rate  * ci / 1000;           // gCO2/hr
+    const co2TotalG = total * ci / 1000;            // gCO2 lifetime
+
+    const rateStr = rate >= 0.1
+      ? `~${rate.toFixed(1)} Wh/hr · ~${co2RateG.toFixed(0)}g CO₂/hr vs ${refLabel}`
+      : null;
+
+    let totalStr = null;
+    if (total >= 0.05) {
+      const whStr  = total < 1000 ? `${total.toFixed(1)} Wh` : `${(total / 1000).toFixed(2)} kWh`;
+      const co2Str = co2TotalG < 1000
+        ? `${co2TotalG.toFixed(0)}g CO₂`
+        : `${(co2TotalG / 1000).toFixed(2)}kg CO₂`;
+      totalStr = `${whStr} · ${co2Str} saved`;
+    }
+
+    if (!rateStr && !totalStr) return '';
+    if (rateStr && totalStr)   return `↓ ${rateStr}\n${totalStr} lifetime`;
     return totalStr ?? rateStr;
   }
 
@@ -592,12 +678,16 @@ class EnergyTracker {
     const effectiveType = conn?.effectiveType ?? '4g';
 
     // ── Stream bitrate: actual measurement first, table fallback ─────────────
-    const height     = this._video.videoHeight || 1080;
-    const fps        = this._measureFPS();
+    const height       = this._video.videoHeight || 1080;
+    const fps          = this._measureFPS();
     const measuredMbps = this._measureActualBitrateMbps();
-    const streamMbps = measuredMbps !== null ? measuredMbps : _ytBitrate(height, fps);
-    const fourKMbps  = _ytBitrate(2160, fps);
-    const deltaMbps  = Math.max(0, fourKMbps - streamMbps);
+    const streamMbps   = measuredMbps !== null ? measuredMbps : _ytBitrate(height, fps);
+
+    // Use highest quality YouTube actually offered — not assumed to be 4K.
+    const maxHeight    = _getMaxAvailableHeight();
+    this._referenceHeight = maxHeight;
+    const ceilingMbps  = _ytBitrate(maxHeight, fps);
+    const deltaMbps    = Math.max(0, ceilingMbps - streamMbps);
 
     // ── GB not transferred this interval ─────────────────────────────────────
     // 1 Mbps for 1 hr = (1e6 b/s × 3600 s) / 8 / 1e9 = 0.45 GB
@@ -771,6 +861,7 @@ class UIManager {
           opacity: 0.75;
           margin-top: 4px;
           line-height: 1.4;
+          white-space: pre-line;
         }
       </style>
       <div id="panel">
