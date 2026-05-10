@@ -16,8 +16,7 @@ export const VERT_SHADER_SRC = `
   }
 `;
 
-// Unsharp mask: amplifies high-frequency detail using a 4-tap diagonal blur.
-// Diagonal taps avoid the cross-shaped ringing produced by axis-aligned sampling.
+// 4-tap diagonal unsharp mask. Diagonal taps avoid cross-shaped ringing artifacts.
 export const FRAG_UNSHARP_SRC = `
   precision mediump float;
 
@@ -32,15 +31,14 @@ export const FRAG_UNSHARP_SRC = `
     vec2 uv = v_texCoord;
     vec4 center = texture2D(u_texture, uv);
 
-    vec2 offset = u_texelSize * u_radius;
-    vec4 blur =
-      texture2D(u_texture, uv + vec2(-offset.x, -offset.y)) +
-      texture2D(u_texture, uv + vec2( offset.x, -offset.y)) +
-      texture2D(u_texture, uv + vec2(-offset.x,  offset.y)) +
-      texture2D(u_texture, uv + vec2( offset.x,  offset.y));
-    blur *= 0.25;
+    vec2 off = u_texelSize * u_radius;
+    vec4 blur = (
+      texture2D(u_texture, uv + vec2(-off.x, -off.y)) +
+      texture2D(u_texture, uv + vec2( off.x, -off.y)) +
+      texture2D(u_texture, uv + vec2(-off.x,  off.y)) +
+      texture2D(u_texture, uv + vec2( off.x,  off.y))
+    ) * 0.25;
 
-    // output = original + (original - blur) * strength
     vec4 sharpened = center + (center - blur) * u_strength;
     gl_FragColor = clamp(sharpened, 0.0, 1.0);
   }

@@ -1,4 +1,5 @@
 import { UpscalerPipeline } from './upscaler.js';
+import { AITileUpscaler } from './ai-upscaler.js';
 
 // YouTube Eco Upscaler — content script orchestrator.
 
@@ -15,7 +16,6 @@ class SettingsManager {
   _defaults() {
     return {
       enabled: false,
-      mode: 'balanced',
       debugMode: false,
       status: 'off',
     };
@@ -134,7 +134,6 @@ class VideoDetector {
           if (node === video) {
             this._replacementObserver.disconnect();
             this._replacementObserver = null;
-            // Give YouTube a brief moment to insert the replacement video element.
             setTimeout(() => {
               const newVideo = this._findVideo();
               if (newVideo && newVideo !== video) {
@@ -167,12 +166,22 @@ class OverlayManager {
 
   create(video) {
     this._video = video;
-    // Append canvas inside #movie_player so our z-index sits in the same stacking
-    // context as YouTube's controls. CSS positions it via inset: 0.
     this._player = document.querySelector('#movie_player') || video.parentElement;
 
     const canvas = document.createElement('canvas');
     canvas.id = 'eco-upscaler-overlay';
+    // Inline styles beat YouTube's own stylesheets, which would otherwise override
+    // position/size and show the canvas at its natural pixel-buffer dimensions.
+    Object.assign(canvas.style, {
+      position: 'absolute',
+      top: '0',
+      left: '0',
+      width: '100%',
+      height: '100%',
+      pointerEvents: 'none',
+      zIndex: '50',
+      imageRendering: 'auto',
+    });
     this._player.appendChild(canvas);
     this._canvas = canvas;
 
@@ -215,13 +224,12 @@ class OverlayManager {
     }
   }
 
-  // Updates the canvas pixel buffer size to match the player's current display size.
   _updateCanvasSize() {
     const canvas = this._canvas;
     const container = this._player;
     if (!canvas || !container) return;
 
-    const dpr = devicePixelRatio;
+    const dpr = devicePixelRatio || 1;
     const w = container.clientWidth;
     const h = container.clientHeight;
     if (w === 0 || h === 0) return;
@@ -231,15 +239,11 @@ class OverlayManager {
   }
 
   _startResizeObserver() {
-    this._resizeObserver = new ResizeObserver(() => {
-      this._updateCanvasSize();
-    });
+    this._resizeObserver = new ResizeObserver(() => this._updateCanvasSize());
     this._resizeObserver.observe(this._player);
   }
 
   _handleFullscreen() {
-    // Canvas is already inside #movie_player which becomes the fullscreen element,
-    // so no reparenting is needed. Just sync the pixel buffer size.
     this._fsHandler = () => this._updateCanvasSize();
     document.addEventListener('fullscreenchange', this._fsHandler);
   }
@@ -248,7 +252,6 @@ class OverlayManager {
     document.addEventListener('yt-set-theater-mode-enabled', () => {
       setTimeout(() => this._updateCanvasSize(), 50);
     });
-
     const app = document.querySelector('ytd-app');
     if (app) {
       this._theaterObserver = new MutationObserver(() => {
@@ -268,15 +271,17 @@ class FrameProcessor {
     this._running = false;
     this._video = null;
     this._pipeline = null;
+    this._aiUpscaler = null;
     this._perfMonitor = null;
     this._rafId = null;
     this._useRVFC = false;
   }
 
-  start(video, pipeline, perfMonitor) {
+  start(video, pipeline, perfMonitor, aiUpscaler = null) {
     this.stop();
     this._video = video;
     this._pipeline = pipeline;
+    this._aiUpscaler = aiUpscaler;
     this._perfMonitor = perfMonitor;
     this._running = true;
     this._useRVFC = typeof video.requestVideoFrameCallback === 'function';
@@ -316,11 +321,13 @@ class FrameProcessor {
     if (!video) return;
     if (document.hidden) return;
     if (video.paused || video.ended) return;
-    if (video.readyState < 2) return; // HAVE_CURRENT_DATA — no frame yet
+    if (video.readyState < 2) return;
 
     const t0 = performance.now();
     this._pipeline.processFrame();
     this._perfMonitor.recordFrame(performance.now() - t0);
+    // AI pass is self-throttled to 4fps; runs async after the sync WebGL pass
+    if (this._aiUpscaler) this._aiUpscaler.processFrame();
   }
 }
 
@@ -344,7 +351,6 @@ class PerformanceMonitor {
     this._frameIndex++;
     this._frameCount++;
 
-    // Evaluate every 30 frames.
     if (this._frameCount % 30 !== 0) return;
 
     const avg = this._frameTimes.reduce((a, b) => a + b, 0) / 30;
@@ -382,6 +388,226 @@ class PerformanceMonitor {
 }
 
 // ============================================================================
+// BackgroundQualityManager — lowers YouTube playback quality when the tab is
+// hidden or blurred, restoring it when the user returns.
+// ============================================================================
+
+class BackgroundQualityManager {
+  constructor(settingsManager) {
+    this._settingsManager = settingsManager;
+    this._player = null;
+    this._savedQuality = null;
+    this._boundUpdate = this._update.bind(this);
+  }
+
+  start(player) {
+    this._player = player;
+    document.addEventListener('visibilitychange', this._boundUpdate);
+    window.addEventListener('blur', this._boundUpdate);
+    window.addEventListener('focus', this._boundUpdate);
+    this._update();
+  }
+
+  stop() {
+    document.removeEventListener('visibilitychange', this._boundUpdate);
+    window.removeEventListener('blur', this._boundUpdate);
+    window.removeEventListener('focus', this._boundUpdate);
+    this._restore();
+    this._player = null;
+  }
+
+  refresh() {
+    this._update();
+  }
+
+  _update() {
+    if (!this._settingsManager.get().enabled) { this._restore(); return; }
+    if (document.hidden || !document.hasFocus()) this._lower();
+    else this._restore();
+  }
+
+  _lower() {
+    const player = this._player || document.querySelector('#movie_player');
+    if (!player) return;
+    try {
+      if (!this._savedQuality && typeof player.getPlaybackQuality === 'function') {
+        this._savedQuality = player.getPlaybackQuality();
+      }
+      if (typeof player.setPlaybackQualityRange === 'function') player.setPlaybackQualityRange('tiny', 'tiny');
+      if (typeof player.setPlaybackQuality === 'function') player.setPlaybackQuality('tiny');
+    } catch { /* YouTube player API unavailable */ }
+  }
+
+  _restore() {
+    const player = this._player || document.querySelector('#movie_player');
+    if (!player || !this._savedQuality) return;
+    try {
+      if (typeof player.setPlaybackQualityRange === 'function') player.setPlaybackQualityRange(this._savedQuality, this._savedQuality);
+      if (typeof player.setPlaybackQuality === 'function') player.setPlaybackQuality(this._savedQuality);
+    } catch { /* YouTube player API unavailable */ }
+    this._savedQuality = null;
+  }
+}
+
+// ============================================================================
+// EnergyTracker — dynamic statistical energy savings model.
+//
+// Sources blended into the lookup table:
+//   • IEA "Electricity 2024" — device decode power by resolution tier
+//   • Carbon Trust "Streaming" (2021) — end-to-end network + CDN energy
+//   • Malmodin & Lundén (2018) — energy intensity per GB by access type
+//
+// Model structure (Wh/hr saved vs streaming the same content at native 4K):
+//   savings = device_savings(sourceHeight) + network_savings(bitrateDelta, connType)
+//
+// Network savings: Δbitrate (Mbps) × 0.45 GB/Mbps/hr × kWh_per_GB × 1000
+//   kWh/GB: ethernet 0.04, wifi 0.08, 4g 0.24, 3g 0.40, 2g 0.60, unknown 0.10
+// Device savings: linear with pixel-count reduction from 4K baseline (≈8 W max delta)
+//
+// Both are pre-computed into _SAVINGS_TABLE for O(1) lookup per tick.
+// ============================================================================
+
+const _SAVINGS_TABLE = (() => {
+  // YouTube average bitrates (Mbps) per height tier
+  const BITRATE = { 2160: 20, 1440: 12, 1080: 6.5, 720: 3.5, 480: 2, 360: 1, 0: 6.5 };
+
+  // Network energy intensity (kWh per GB transferred), includes last-mile + CDN
+  const KWH_PER_GB = { ethernet: 0.04, wifi: 0.08, '4g': 0.24, cellular: 0.24, '3g': 0.40, '2g': 0.60, unknown: 0.10 };
+
+  // Max additional GPU/CPU decode power for 4K vs minimal (W)
+  const MAX_DECODE_W = 8;
+  const PX_4K = 3840 * 2160;
+
+  const heights = [2160, 1440, 1080, 720, 480, 360, 0];
+  const connTypes = Object.keys(KWH_PER_GB);
+  const table = {};
+
+  for (const h of heights) {
+    table[h] = {};
+    const bitrateDelta = Math.max(0, BITRATE[2160] - (BITRATE[h] ?? BITRATE[0]));
+    const gbPerHr = bitrateDelta * 0.45; // 1 Mbps × 3600s / 8 / 1000 ≈ 0.45 GB/hr
+
+    // Pixel-count ratio vs 4K; assume 16:9 source
+    const srcPx = h > 0 ? (h * 16 / 9) * h : (1080 * 16 / 9) * 1080;
+    const decodeWhPerHr = MAX_DECODE_W * Math.max(0, 1 - srcPx / PX_4K);
+
+    for (const c of connTypes) {
+      const networkWhPerHr = gbPerHr * (KWH_PER_GB[c] ?? KWH_PER_GB.unknown) * 1000;
+      table[h][c] = parseFloat((networkWhPerHr + decodeWhPerHr).toFixed(2));
+    }
+  }
+  return table;
+})();
+
+function _lookupRate(videoHeight, connType) {
+  const heights = [2160, 1440, 1080, 720, 480, 360];
+  const h = heights.find(t => videoHeight >= t) ?? 0;
+  const row = _SAVINGS_TABLE[h] ?? _SAVINGS_TABLE[0];
+  return row[connType] ?? row.unknown;
+}
+
+function _connectionType() {
+  const conn = navigator.connection;
+  if (!conn) return 'unknown';
+  // effectiveType ('slow-2g','2g','3g','4g') takes precedence over type
+  const et = conn.effectiveType;
+  if (et === '4g') return '4g';
+  if (et === '3g') return '3g';
+  if (et === '2g' || et === 'slow-2g') return '2g';
+  const t = conn.type;
+  if (t === 'ethernet') return 'ethernet';
+  if (t === 'wifi') return 'wifi';
+  if (t === 'cellular') return 'cellular';
+  return 'unknown';
+}
+
+class EnergyTracker {
+  constructor() {
+    this._startMs  = null;
+    this._video    = null;
+    this._sessionWh = 0;
+    this._totalWh  = 0;
+    this._currentRate = 0; // Wh/hr, updated each flush
+    this._interval = null;
+    this._onUpdate = null;
+  }
+
+  async load() {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get({ ecoTotalWh: 0 }, (res) => {
+          this._totalWh = typeof res.ecoTotalWh === 'number' ? res.ecoTotalWh : 0;
+          resolve();
+        });
+      } catch { resolve(); }
+    });
+  }
+
+  begin(video, onUpdate) {
+    if (this._interval) return;
+    this._video    = video;
+    this._onUpdate = onUpdate;
+    this._startMs  = Date.now();
+    this._interval = setInterval(() => this._tick(), 10_000);
+  }
+
+  end() {
+    if (this._interval) { clearInterval(this._interval); this._interval = null; }
+    this._flush();
+    this._startMs = null;
+    this._video   = null;
+    this._persist();
+    if (this._onUpdate) this._onUpdate();
+  }
+
+  destroy() {
+    this.end();
+    this._sessionWh  = 0;
+    this._currentRate = 0;
+    this._onUpdate   = null;
+  }
+
+  // Returns a two-line display string: current rate + lifetime total.
+  formatDisplay() {
+    const total = this._totalWh;
+    const rate  = this._currentRate;
+    const totalStr = total < 0.05 ? null
+      : total < 1000 ? `${total.toFixed(1)} Wh saved`
+      : `${(total / 1000).toFixed(3)} kWh saved`;
+    const rateStr = rate >= 0.1 ? `${rate.toFixed(1)} Wh/hr vs 4K` : null;
+    if (!totalStr && !rateStr) return '';
+    if (rateStr && totalStr) return `↓ ${rateStr} · ${totalStr} lifetime`;
+    return totalStr ?? rateStr;
+  }
+
+  _tick() {
+    this._flush();
+    if (this._onUpdate) this._onUpdate();
+  }
+
+  _flush() {
+    if (!this._startMs) return;
+    const now = Date.now();
+    const hrs = (now - this._startMs) / 3_600_000;
+    this._startMs = now;
+    // Only count time while the video is actually playing
+    if (!this._video || this._video.paused || this._video.ended) return;
+    const height   = this._video.videoHeight || 1080;
+    const connType = _connectionType();
+    this._currentRate = _lookupRate(height, connType);
+    const wh = hrs * this._currentRate;
+    this._sessionWh += wh;
+    this._totalWh   += wh;
+  }
+
+  _persist() {
+    try {
+      chrome.storage.local.set({ ecoTotalWh: parseFloat(this._totalWh.toFixed(3)) });
+    } catch { /* context invalidated */ }
+  }
+}
+
+// ============================================================================
 // UIManager — Shadow DOM floating panel injected into the YouTube player
 // ============================================================================
 
@@ -397,6 +623,14 @@ class UIManager {
 
     const host = document.createElement('div');
     host.id = 'eco-upscaler-ui';
+    // Positioned full-size overlay so the panel inside shadow DOM stacks above the
+    // canvas (z-index 50). pointer-events:none lets clicks pass through empty areas.
+    Object.assign(host.style, {
+      position: 'absolute',
+      top: '0', left: '0', right: '0', bottom: '0',
+      pointerEvents: 'none',
+      zIndex: '2147483641',
+    });
     anchorElement.style.position = anchorElement.style.position || 'relative';
     anchorElement.appendChild(host);
     this._host = host;
@@ -414,6 +648,7 @@ class UIManager {
           position: absolute;
           top: 12px;
           right: 12px;
+          pointer-events: auto;
           background: rgba(0, 0, 0, 0.82);
           color: #fff;
           border-radius: 10px;
@@ -435,11 +670,6 @@ class UIManager {
         }
         .row:last-child { margin-bottom: 0; }
         label { color: #ccc; white-space: nowrap; }
-        .toggle-wrap {
-          display: flex;
-          align-items: center;
-          gap: 6px;
-        }
         .switch {
           position: relative;
           width: 34px;
@@ -468,15 +698,6 @@ class UIManager {
         }
         input:checked + .slider { background: #4ade80; }
         input:checked + .slider:before { transform: translateX(16px); }
-        select {
-          background: #333;
-          color: #fff;
-          border: 1px solid #555;
-          border-radius: 4px;
-          padding: 2px 4px;
-          font-size: 11px;
-          cursor: pointer;
-        }
         #status-badge {
           font-size: 10px;
           font-weight: 600;
@@ -491,6 +712,14 @@ class UIManager {
         #status-badge.degraded { background: #7c2d12; color: #fb923c; }
         #status-badge.disabled { background: #450a0a; color: #f87171; }
         #res { color: #666; font-size: 10px; text-align: right; }
+        #energy {
+          color: #4ade80;
+          font-size: 10px;
+          text-align: right;
+          opacity: 0.75;
+          margin-top: 4px;
+          line-height: 1.4;
+        }
       </style>
       <div id="panel">
         <div class="row">
@@ -501,27 +730,16 @@ class UIManager {
           </label>
         </div>
         <div class="row">
-          <label>Mode</label>
-          <select id="mode-select">
-            <option value="smooth"  ${settings.mode === 'smooth'  ? 'selected' : ''}>Smooth</option>
-            <option value="balanced"${settings.mode === 'balanced' ? 'selected' : ''}>Balanced</option>
-            <option value="sharp"   ${settings.mode === 'sharp'   ? 'selected' : ''}>Sharp</option>
-          </select>
-        </div>
-        <div class="row">
           <label>Status</label>
           <span id="status-badge">Off</span>
         </div>
         <div id="res"></div>
+        <div id="energy"></div>
       </div>
     `;
 
     shadow.getElementById('toggle').addEventListener('change', (e) => {
       if (this._callbacks.onToggle) this._callbacks.onToggle(e.target.checked);
-    });
-
-    shadow.getElementById('mode-select').addEventListener('change', (e) => {
-      if (this._callbacks.onModeChange) this._callbacks.onModeChange(e.target.value);
     });
 
     this.updateStatus(settings.enabled ? 'active' : 'off');
@@ -544,16 +762,16 @@ class UIManager {
     badge.className = status;
   }
 
-  updateMode(mode) {
-    if (!this._shadow) return;
-    const sel = this._shadow.getElementById('mode-select');
-    if (sel) sel.value = mode;
-  }
-
   updateToggle(enabled) {
     if (!this._shadow) return;
     const toggle = this._shadow.getElementById('toggle');
     if (toggle) toggle.checked = enabled;
+  }
+
+  updateEnergy(text) {
+    if (!this._shadow) return;
+    const el = this._shadow.getElementById('energy');
+    if (el) el.textContent = text || '';
   }
 
   updateResolution(width, height, rendererSuffix = '') {
@@ -580,11 +798,12 @@ let _overlayManager = null;
 let _upscalerPipeline = null;
 let _frameProcessor = null;
 let _perfMonitor = null;
+let _backgroundQualityManager = null;
+let _aiUpscaler = null;
+let _energyTracker = null;
 let _uiManager = null;
 let _initialized = false;
 let _currentPath = '';
-
-const MODE_ORDER = ['sharp', 'balanced', 'smooth'];
 
 async function init() {
   if (_initialized) return;
@@ -593,10 +812,9 @@ async function init() {
 
   const settings = _settingsManager.get();
 
-  // Find video element.
   _videoDetector = new VideoDetector();
   _videoDetector.onVideoFound = (video) => _onVideoReady(video, settings);
-  _videoDetector.onVideoReplaced = (video) => {
+  _videoDetector.onVideoReplaced = () => {
     cleanup();
     setTimeout(() => init(), 150);
   };
@@ -607,31 +825,26 @@ async function _onVideoReady(video, settings) {
   if (_initialized) return;
   _initialized = true;
 
-  // Create overlay canvas.
   _overlayManager = new OverlayManager();
   const canvas = _overlayManager.create(video);
 
-  // Build upscaler pipeline BEFORE hiding the canvas — Anime4K's render() internally
-  // reads canvas dimensions to configure its WebGPU context. A display:none canvas
-  // reports clientWidth/clientHeight of 0, producing a 0×0 render target.
   _upscalerPipeline = new UpscalerPipeline(canvas, video, settings);
   await _upscalerPipeline.init();
 
-  // Hide canvas after pipeline is bound.
+  _energyTracker = new EnergyTracker();
+  await _energyTracker.load();
+
+  const playerContainer = document.querySelector('#movie_player') || video.parentElement;
+  if (playerContainer) {
+    _aiUpscaler = new AITileUpscaler(playerContainer, video);
+    await _aiUpscaler.init(); // fails silently if FaceDetector/ONNX unavailable
+  }
+
   _overlayManager.setVisible(settings.enabled);
 
-  // Performance monitor with auto-downgrade wiring.
   _perfMonitor = new PerformanceMonitor();
-  _perfMonitor.onDegrade((fps) => {
-    const currentMode = _settingsManager.get().mode;
-    const idx = MODE_ORDER.indexOf(currentMode);
-    if (idx < MODE_ORDER.length - 1) {
-      const nextMode = MODE_ORDER[idx + 1];
-      _settingsManager.save({ mode: nextMode });
-      _upscalerPipeline.updateSettings({ mode: nextMode });
-      _uiManager && _uiManager.updateMode(nextMode);
-      _uiManager && _uiManager.updateStatus('degraded');
-    }
+  _perfMonitor.onDegrade(() => {
+    _uiManager && _uiManager.updateStatus('degraded');
   });
   _perfMonitor.onDisable(() => {
     _settingsManager.save({ enabled: false, status: 'disabled' });
@@ -644,81 +857,69 @@ async function _onVideoReady(video, settings) {
     _uiManager && _uiManager.updateStatus('active');
   });
 
-  // Start frame loop only if enabled and NOT using Anime4K.
-  // Anime4K's render() drives its own internal loop — FrameProcessor is not needed.
   _frameProcessor = new FrameProcessor();
-  const isAnime4K = _upscalerPipeline.getRendererType() === 'anime4k';
-  if (settings.enabled && !isAnime4K) {
-    _frameProcessor.start(video, _upscalerPipeline, _perfMonitor);
+  if (settings.enabled) {
+    _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
+    _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
   }
 
-  // Inject floating UI into the player container.
-  const playerContainer = document.querySelector('#movie_player') || video.parentElement;
   if (playerContainer) {
+    _backgroundQualityManager = new BackgroundQualityManager(_settingsManager);
+    _backgroundQualityManager.start(playerContainer);
+
     _uiManager = new UIManager();
     _uiManager.inject(playerContainer, settings, {
       onToggle: (enabled) => {
         _settingsManager.save({ enabled, status: enabled ? 'active' : 'off' });
         _overlayManager.setVisible(enabled);
-        // Anime4K drives its own loop — just show/hide the canvas.
-        // WebGL/2D need the FrameProcessor started/stopped explicitly.
-        if (_upscalerPipeline.getRendererType() !== 'anime4k') {
-          if (enabled) {
-            _perfMonitor.reset();
-            _frameProcessor.start(video, _upscalerPipeline, _perfMonitor);
-          } else {
-            _frameProcessor.stop();
-          }
+        if (enabled) {
+          _perfMonitor.reset();
+          _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
+          _energyTracker && _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
+        } else {
+          _frameProcessor.stop();
+          _energyTracker && _energyTracker.end();
+          _uiManager.updateEnergy(_energyTracker ? _energyTracker.formatDisplay() : '');
         }
+        _backgroundQualityManager && _backgroundQualityManager.refresh();
         _uiManager.updateStatus(enabled ? 'active' : 'off');
-      },
-      onModeChange: (mode) => {
-        _settingsManager.save({ mode });
-        _upscalerPipeline.updateSettings({ mode });
       },
     });
   }
 
+  if (_uiManager && _energyTracker) {
+    _uiManager.updateEnergy(_energyTracker.formatDisplay());
+  }
 
-  // Show renderer type in resolution display (e.g. "Source: 1080p · AI").
-  const rendererLabel = isAnime4K ? ' · AI' : (_upscalerPipeline.getRendererType() === 'webgl' ? ' · GL' : '');
+  const rendererLabel = _upscalerPipeline.getRendererType() === 'webgl' ? ' · GL' : '';
   const showRes = () => {
-    if (_uiManager) {
-      _uiManager.updateResolution(video.videoWidth, video.videoHeight, rendererLabel);
-    }
+    if (_uiManager) _uiManager.updateResolution(video.videoWidth, video.videoHeight, rendererLabel);
   };
   video.addEventListener('loadedmetadata', showRes);
   showRes();
 
-  // Anime4K captures video dimensions once at render() init and uses them for every
-  // copyExternalImageToTexture call. If YouTube's adaptive quality switches the video
-  // to a smaller resolution, the frozen copy rect becomes out-of-bounds and crashes
-  // the GPU pipeline. Re-initializing on resize fixes this.
+  // Reinit on adaptive quality switches so canvas tracks the new source dimensions.
   video.addEventListener('resize', () => {
     if (!_initialized) return;
     cleanup();
     setTimeout(() => init(), 150);
   });
 
-  // React to settings changes from the popup.
   _settingsManager.onChange((all, changed) => {
     if (!_initialized) return;
     if ('enabled' in changed) {
       _overlayManager.setVisible(all.enabled);
       _uiManager && _uiManager.updateToggle(all.enabled);
-      if (_upscalerPipeline.getRendererType() !== 'anime4k') {
-        if (all.enabled) {
-          _perfMonitor.reset();
-          _frameProcessor.start(video, _upscalerPipeline, _perfMonitor);
-        } else {
-          _frameProcessor.stop();
-        }
+      if (all.enabled) {
+        _perfMonitor.reset();
+        _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
+        _energyTracker && _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
+      } else {
+        _frameProcessor.stop();
+        _energyTracker && _energyTracker.end();
+        _uiManager && _uiManager.updateEnergy(_energyTracker ? _energyTracker.formatDisplay() : '');
       }
       _uiManager && _uiManager.updateStatus(all.enabled ? 'active' : 'off');
-    }
-    if ('mode' in changed) {
-      _upscalerPipeline.updateSettings({ mode: all.mode });
-      _uiManager && _uiManager.updateMode(all.mode);
     }
   });
 }
@@ -730,12 +931,18 @@ function cleanup() {
   try { chrome.storage.local.set({ onWatchPage: false, status: 'off' }); } catch { /* context invalidated */ }
 
   _frameProcessor && _frameProcessor.stop();
+  _aiUpscaler && _aiUpscaler.destroy();
+  _energyTracker && _energyTracker.destroy();
+  _backgroundQualityManager && _backgroundQualityManager.stop();
   _uiManager && _uiManager.remove();
   _overlayManager && _overlayManager.destroy();
   _upscalerPipeline && _upscalerPipeline.destroy();
   _videoDetector && _videoDetector.stop();
 
   _frameProcessor = null;
+  _aiUpscaler = null;
+  _energyTracker = null;
+  _backgroundQualityManager = null;
   _uiManager = null;
   _overlayManager = null;
   _upscalerPipeline = null;
@@ -744,7 +951,6 @@ function cleanup() {
 }
 
 function onNavigate(path) {
-  // Deduplicate — YouTube's 3 navigation signals can all fire for the same event.
   if (path === _currentPath) return;
   _currentPath = path;
 
@@ -756,25 +962,16 @@ function onNavigate(path) {
 }
 
 function interceptNavigation() {
-  // Layer 1: monkey-patch pushState/replaceState.
   const _origPush = history.pushState.bind(history);
   const _origReplace = history.replaceState.bind(history);
   const fireNav = () => onNavigate(location.pathname + location.search);
 
-  history.pushState = function (...args) {
-    _origPush(...args);
-    fireNav();
-  };
-  history.replaceState = function (...args) {
-    _origReplace(...args);
-    fireNav();
-  };
+  history.pushState = function (...args) { _origPush(...args); fireNav(); };
+  history.replaceState = function (...args) { _origReplace(...args); fireNav(); };
   window.addEventListener('popstate', fireNav);
 
-  // Layer 2: YouTube's own post-navigation event (fires after player DOM updates).
   document.addEventListener('yt-navigate-finish', fireNav);
 
-  // Layer 3: MutationObserver on <title> as last-resort backup.
   const titleEl = document.querySelector('title');
   if (titleEl) {
     new MutationObserver(() => {
@@ -791,10 +988,7 @@ function interceptNavigation() {
 async function bootstrap() {
   _settingsManager = new SettingsManager();
   await _settingsManager.load();
-
   interceptNavigation();
-
-  // Check current page on initial load.
   onNavigate(location.pathname + location.search);
 }
 

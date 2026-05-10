@@ -9,7 +9,7 @@
   "content_scripts": [
     {
       "matches": ["https://www.youtube.com/*"],
-      "js": ["content.bundle.js"],
+      "js": ["lib/ort.min.js", "content.bundle.js"],
       "css": ["styles.css"],
       "run_at": "document_idle",
       "all_frames": false
@@ -27,7 +27,7 @@
   "web_accessible_resources": [
     {
       "matches": ["https://www.youtube.com/*"],
-      "resources": ["icons/*.png"]
+      "resources": ["icons/*.png", "lib/*.wasm", "models/*.onnx"]
     }
   ]
 }
