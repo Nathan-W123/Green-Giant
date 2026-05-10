@@ -275,8 +275,6 @@
   var MODEL_IN = 224;
   var MODEL_OUT = 672;
   var AI_INTERVAL_MS = 250;
-  var MAX_FACES = 3;
-  var FACE_PAD = 0.18;
   var AITileUpscaler = class {
     constructor(container, video) {
       this._container = container;
@@ -285,7 +283,6 @@
       this._ctx = null;
       this._session = null;
       this._inputDtype = "float32";
-      this._detector = null;
       this._ready = false;
       this._lastMs = 0;
       this._scratch = document.createElement("canvas");
@@ -296,10 +293,9 @@
     async init() {
       try {
         await this._initORT();
-        await this._initDetector();
         this._createCanvas();
         this._ready = true;
-        console.log("[EcoUpscaler] AI tile upscaler ready.");
+        console.log("[EcoUpscaler] AI upscaler ready (full-frame mode).");
       } catch (e) {
         console.warn("[EcoUpscaler] AI upscaler unavailable:", e.message);
         this._ready = false;
@@ -316,20 +312,8 @@
       this._lastMs = now;
       const video = this._video;
       if (!video || video.paused || video.readyState < 2) return;
-      let faces;
-      try {
-        faces = await this._detector.detect(video);
-      } catch {
-        return;
-      }
       this._syncSize();
-      this._ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
-      if (!faces.length) return;
-      const scaleX = this._canvas.width / video.videoWidth;
-      const scaleY = this._canvas.height / video.videoHeight;
-      for (const face of faces.slice(0, MAX_FACES)) {
-        await this._enhanceFace(face.boundingBox, video, scaleX, scaleY);
-      }
+      await this._enhanceFullFrame(video);
     }
     resize() {
       this._syncSize();
@@ -344,7 +328,6 @@
         this._session.release?.();
         this._session = null;
       }
-      this._detector = null;
     }
     // ── private ────────────────────────────────────────────────────────────────
     async _initORT() {
@@ -355,7 +338,6 @@
       const candidates = [
         { file: "models/super-resolution-fp16.onnx", dtype: "float16" },
         { file: "models/super-resolution-int8.onnx", dtype: "float32" },
-        // INT8 weights, FP32 I/O
         { file: "models/super-resolution-10.onnx", dtype: "float32" }
       ];
       let modelUrl = null;
@@ -380,16 +362,6 @@
       this._inputDtype = dtype;
       console.log(`[EcoUpscaler] Loaded ${modelUrl.split("/").pop()} (${dtype})`);
     }
-    async _initDetector() {
-      if (!("FaceDetector" in window)) throw new Error("FaceDetector API not available");
-      this._detector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: MAX_FACES });
-      this._scratch.width = 4;
-      this._scratch.height = 4;
-      try {
-        await this._detector.detect(this._scratch);
-      } catch {
-      }
-    }
     _createCanvas() {
       const canvas = document.createElement("canvas");
       canvas.id = "eco-ai-overlay";
@@ -401,7 +373,6 @@
         height: "100%",
         pointerEvents: "none",
         zIndex: "51"
-        // one above WebGL canvas (z-index 50)
       });
       this._container.appendChild(canvas);
       this._canvas = canvas;
@@ -418,22 +389,14 @@
         this._canvas.height = h;
       }
     }
-    async _enhanceFace(bbox, video, scaleX, scaleY) {
-      const vw = video.videoWidth, vh = video.videoHeight;
-      const px = bbox.width * FACE_PAD;
-      const py = bbox.height * FACE_PAD;
-      const sx = Math.max(0, bbox.x - px);
-      const sy = Math.max(0, bbox.y - py);
-      const sw = Math.min(vw - sx, bbox.width + 2 * px);
-      const sh = Math.min(vh - sy, bbox.height + 2 * py);
-      if (sw < 8 || sh < 8) return;
+    async _enhanceFullFrame(video) {
       this._scratch.width = MODEL_IN;
       this._scratch.height = MODEL_IN;
-      this._sctx.drawImage(video, sx, sy, sw, sh, 0, 0, MODEL_IN, MODEL_IN);
-      const tileData = this._sctx.getImageData(0, 0, MODEL_IN, MODEL_IN).data;
+      this._sctx.drawImage(video, 0, 0, MODEL_IN, MODEL_IN);
+      const frameData = this._sctx.getImageData(0, 0, MODEL_IN, MODEL_IN).data;
       const luma = new Float32Array(MODEL_IN * MODEL_IN);
       for (let i = 0; i < MODEL_IN * MODEL_IN; i++) {
-        luma[i] = (0.299 * tileData[i * 4] + 0.587 * tileData[i * 4 + 1] + 0.114 * tileData[i * 4 + 2]) / 255;
+        luma[i] = (0.299 * frameData[i * 4] + 0.587 * frameData[i * 4 + 1] + 0.114 * frameData[i * 4 + 2]) / 255;
       }
       const ort = window.ort;
       let outLuma;
@@ -456,7 +419,7 @@
       }
       this._scratch2.width = MODEL_OUT;
       this._scratch2.height = MODEL_OUT;
-      this._sctx2.drawImage(video, sx, sy, sw, sh, 0, 0, MODEL_OUT, MODEL_OUT);
+      this._sctx2.drawImage(video, 0, 0, MODEL_OUT, MODEL_OUT);
       const chromaData = this._sctx2.getImageData(0, 0, MODEL_OUT, MODEL_OUT).data;
       const outPixels = new Uint8ClampedArray(MODEL_OUT * MODEL_OUT * 4);
       for (let i = 0; i < MODEL_OUT * MODEL_OUT; i++) {
@@ -474,13 +437,7 @@
       this._scratch2.width = MODEL_OUT;
       this._scratch2.height = MODEL_OUT;
       this._sctx2.putImageData(new ImageData(outPixels, MODEL_OUT, MODEL_OUT), 0, 0);
-      this._ctx.drawImage(
-        this._scratch2,
-        sx * scaleX,
-        sy * scaleY,
-        sw * scaleX,
-        sh * scaleY
-      );
+      this._ctx.drawImage(this._scratch2, 0, 0, this._canvas.width, this._canvas.height);
     }
   };
 
