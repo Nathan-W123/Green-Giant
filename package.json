@@ -4,17 +4,18 @@
   "description": "",
   "main": "content.js",
   "scripts": {
-    "build": "esbuild content.js --bundle --format=iife --outfile=content.bundle.js",
-    "watch": "esbuild content.js --bundle --format=iife --outfile=content.bundle.js --watch"
+    "setup": "node setup.cjs",
+    "build": "node setup.cjs && esbuild content.js --bundle --format=iife --outfile=content.bundle.js",
+    "watch": "node setup.cjs && esbuild content.js --bundle --format=iife --outfile=content.bundle.js --watch"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
-  "dependencies": {
-    "anime4k-webgpu": "^1.0.0"
-  },
   "devDependencies": {
     "esbuild": "^0.28.0"
+  },
+  "dependencies": {
+    "onnxruntime-web": "^1.26.0"
   }
 }
