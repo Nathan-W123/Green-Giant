@@ -69,8 +69,12 @@ export class AITileUpscaler {
     const ort = window.ort;
     if (!ort) throw new Error('window.ort not found — ensure lib/ort.min.js loads first');
 
-    // WASM is baked into ort.min.js (built from ort.bundle.min.mjs by setup.cjs).
-    // No wasmPaths needed — there is nothing to fetch externally.
+    // proxy=false: run WASM inference on the main thread with no worker.
+    // Content script workers cannot resolve chrome-extension:// URLs, so ORT's
+    // default proxy worker always fails with "cannot determine script source URL".
+    // numThreads=1 + proxy=false = single-threaded main-thread execution.
+    // WASM binary is embedded in ort.min.js (built from ort.bundle.min.mjs).
+    ort.env.wasm.proxy      = false;
     ort.env.wasm.numThreads = 1;
 
     const candidates = [

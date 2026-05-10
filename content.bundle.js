@@ -338,6 +338,7 @@
     async _initORT() {
       const ort = window.ort;
       if (!ort) throw new Error("window.ort not found \u2014 ensure lib/ort.min.js loads first");
+      ort.env.wasm.proxy = false;
       ort.env.wasm.numThreads = 1;
       const candidates = [
         { file: "models/super-resolution-int8.onnx", dtype: "float32" },
