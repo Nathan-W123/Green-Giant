@@ -273,39 +273,40 @@
 
   // ai-upscaler.js
   var MODEL_IN = 224;
-  var MODEL_OUT = 672;
   var AI_INTERVAL_MS = 250;
+  var GAUSS = [
+    1 / 16,
+    2 / 16,
+    1 / 16,
+    2 / 16,
+    4 / 16,
+    2 / 16,
+    1 / 16,
+    2 / 16,
+    1 / 16
+  ];
   var AITileUpscaler = class {
     constructor(container, video) {
       this._container = container;
       this._video = video;
       this._canvas = null;
       this._ctx = null;
-      this._session = null;
-      this._inputDtype = "float32";
       this._ready = false;
       this._lastMs = 0;
       this._scratch = document.createElement("canvas");
-      this._scratch2 = document.createElement("canvas");
       this._sctx = this._scratch.getContext("2d");
-      this._sctx2 = this._scratch2.getContext("2d");
     }
     async init() {
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          await this._initORT();
-          this._createCanvas();
-          this._ready = true;
-          console.log("[EcoUpscaler] AI upscaler ready (full-frame mode).");
-          return true;
-        } catch (e) {
-          console.warn(`[EcoUpscaler] AI init attempt ${attempt}/3 failed: ${e.message}`);
-          if (attempt < 3) await new Promise((r) => setTimeout(r, 1e3 * attempt));
-        }
+      try {
+        this._createCanvas();
+        this._ready = true;
+        console.log("[EcoUpscaler] AI upscaler ready (JS-native luma-USM mode).");
+        return true;
+      } catch (e) {
+        console.error("[EcoUpscaler] AI init failed:", e.message);
+        this._ready = false;
+        return false;
       }
-      console.error("[EcoUpscaler] AI upscaler permanently unavailable \u2014 check models/ and lib/ directories.");
-      this._ready = false;
-      return false;
     }
     get isReady() {
       return this._ready;
@@ -318,7 +319,7 @@
       const video = this._video;
       if (!video || video.paused || video.readyState < 2) return;
       this._syncSize();
-      await this._enhanceFullFrame(video);
+      this._enhanceFullFrame(video);
     }
     resize() {
       this._syncSize();
@@ -329,49 +330,8 @@
         this._canvas.remove();
         this._canvas = null;
       }
-      if (this._session) {
-        this._session.release?.();
-        this._session = null;
-      }
     }
     // ── private ────────────────────────────────────────────────────────────────
-    async _initORT() {
-      const ort = window.ort;
-      if (!ort) throw new Error("window.ort not found \u2014 ensure lib/ort.min.js loads first");
-      ort.env.wasm.proxy = false;
-      ort.env.wasm.numThreads = 1;
-      ort.env.wasm.wasmPaths = {
-        wasm: chrome.runtime.getURL("lib/ort-wasm-simd-threaded.wasm")
-      };
-      const candidates = [
-        { file: "models/super-resolution-int8.onnx", dtype: "float32" },
-        { file: "models/super-resolution-10.onnx", dtype: "float32" }
-      ];
-      let modelBytes = null;
-      let dtype = "float32";
-      let modelName = "";
-      for (const c of candidates) {
-        try {
-          const url = chrome.runtime.getURL(c.file);
-          const res = await fetch(url);
-          if (res.ok) {
-            modelBytes = new Uint8Array(await res.arrayBuffer());
-            dtype = c.dtype;
-            modelName = c.file;
-            break;
-          }
-        } catch (e) {
-          console.warn(`[EcoUpscaler] fetch ${c.file}:`, e.message);
-        }
-      }
-      if (!modelBytes) throw new Error("No model file found in models/");
-      this._session = await ort.InferenceSession.create(modelBytes, {
-        executionProviders: ["wasm"],
-        graphOptimizationLevel: "all"
-      });
-      this._inputDtype = dtype;
-      console.log(`[EcoUpscaler] AI ready: ${modelName} (${(modelBytes.length / 1024).toFixed(0)} KB, ${dtype})`);
-    }
     _createCanvas() {
       const canvas = document.createElement("canvas");
       canvas.id = "eco-ai-overlay";
@@ -399,55 +359,42 @@
         this._canvas.height = h;
       }
     }
-    async _enhanceFullFrame(video) {
-      this._scratch.width = MODEL_IN;
-      this._scratch.height = MODEL_IN;
-      this._sctx.drawImage(video, 0, 0, MODEL_IN, MODEL_IN);
-      const frameData = this._sctx.getImageData(0, 0, MODEL_IN, MODEL_IN).data;
-      const luma = new Float32Array(MODEL_IN * MODEL_IN);
-      for (let i = 0; i < MODEL_IN * MODEL_IN; i++) {
-        luma[i] = (0.299 * frameData[i * 4] + 0.587 * frameData[i * 4 + 1] + 0.114 * frameData[i * 4 + 2]) / 255;
-      }
-      const ort = window.ort;
-      let outLuma;
-      try {
-        let inputData = luma;
-        let dtype = this._inputDtype ?? "float32";
-        if (dtype === "float16") {
-          if (typeof Float16Array !== "undefined") {
-            inputData = new Float16Array(luma);
-          } else {
-            dtype = "float32";
+    _enhanceFullFrame(video) {
+      const N = MODEL_IN;
+      this._scratch.width = N;
+      this._scratch.height = N;
+      this._sctx.drawImage(video, 0, 0, N, N);
+      const src = this._sctx.getImageData(0, 0, N, N).data;
+      const N2 = N * N;
+      const out = new Uint8ClampedArray(N2 * 4);
+      const USM_STRENGTH = 0.72;
+      for (let y = 0; y < N; y++) {
+        for (let x = 0; x < N; x++) {
+          const i = (y * N + x) * 4;
+          const r = src[i], g = src[i + 1], b = src[i + 2];
+          const origY = 0.299 * r + 0.587 * g + 0.114 * b;
+          let blurY = 0, k = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const ny = Math.min(N - 1, Math.max(0, y + dy));
+              const nx = Math.min(N - 1, Math.max(0, x + dx));
+              const j = (ny * N + nx) * 4;
+              blurY += (0.299 * src[j] + 0.587 * src[j + 1] + 0.114 * src[j + 2]) * GAUSS[k];
+              k++;
+            }
           }
+          const enhY = origY + (origY - blurY) * USM_STRENGTH;
+          const ratio = origY > 1 ? Math.min(enhY / origY, 2) : 1;
+          out[i] = Math.min(255, r * ratio + 0.5);
+          out[i + 1] = Math.min(255, g * ratio + 0.5);
+          out[i + 2] = Math.min(255, b * ratio + 0.5);
+          out[i + 3] = 255;
         }
-        const feeds = { input: new ort.Tensor(dtype, inputData, [1, 1, MODEL_IN, MODEL_IN]) };
-        const results = await this._session.run(feeds);
-        outLuma = results[Object.keys(results)[0]].data;
-      } catch (e) {
-        console.warn("[EcoUpscaler] Inference error:", e.message);
-        return;
       }
-      this._scratch2.width = MODEL_OUT;
-      this._scratch2.height = MODEL_OUT;
-      this._sctx2.drawImage(video, 0, 0, MODEL_OUT, MODEL_OUT);
-      const chromaData = this._sctx2.getImageData(0, 0, MODEL_OUT, MODEL_OUT).data;
-      const outPixels = new Uint8ClampedArray(MODEL_OUT * MODEL_OUT * 4);
-      for (let i = 0; i < MODEL_OUT * MODEL_OUT; i++) {
-        const aiL = Math.max(0, Math.min(1, outLuma[i]));
-        const origL = Math.max(
-          1e-3,
-          (0.299 * chromaData[i * 4] + 0.587 * chromaData[i * 4 + 1] + 0.114 * chromaData[i * 4 + 2]) / 255
-        );
-        const ratio = aiL / origL;
-        outPixels[i * 4] = Math.min(255, chromaData[i * 4] * ratio);
-        outPixels[i * 4 + 1] = Math.min(255, chromaData[i * 4 + 1] * ratio);
-        outPixels[i * 4 + 2] = Math.min(255, chromaData[i * 4 + 2] * ratio);
-        outPixels[i * 4 + 3] = 255;
-      }
-      this._scratch2.width = MODEL_OUT;
-      this._scratch2.height = MODEL_OUT;
-      this._sctx2.putImageData(new ImageData(outPixels, MODEL_OUT, MODEL_OUT), 0, 0);
-      this._ctx.drawImage(this._scratch2, 0, 0, this._canvas.width, this._canvas.height);
+      this._sctx.putImageData(new ImageData(out, N, N), 0, 0);
+      this._ctx.imageSmoothingEnabled = true;
+      this._ctx.imageSmoothingQuality = "high";
+      this._ctx.drawImage(this._scratch, 0, 0, this._canvas.width, this._canvas.height);
     }
   };
 
