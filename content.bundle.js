@@ -825,8 +825,8 @@
     480: { 30: 1.5, 60: 2.5 },
     360: { 30: 0.8, 60: 1.2 }
   };
-  var _WH_PER_GB_WIFI = 0.395;
-  var _MAX_DECODE_W = 4;
+  var _WH_PER_GB_WIFI = 4.5;
+  var _MAX_DECODE_W = 6;
   var _PX_4K = 3840 * 2160;
   function _networkMultiplier(rtt, effectiveType) {
     let m;
@@ -917,15 +917,11 @@
       const conn = navigator.connection;
       const rtt = conn?.rtt ?? 50;
       const effectiveType = conn?.effectiveType ?? "4g";
-      const downlink = conn?.downlink ?? null;
       const height = this._video.videoHeight || 1080;
       const fps = this._measureFPS();
       const streamMbps = _ytBitrate(height, fps);
       const fourKMbps = _ytBitrate(2160, fps);
-      let deltaMbps = Math.max(0, fourKMbps - streamMbps);
-      if (downlink !== null && downlink < fourKMbps) {
-        deltaMbps = Math.max(0, Math.min(deltaMbps, downlink - streamMbps));
-      }
+      const deltaMbps = Math.max(0, fourKMbps - streamMbps);
       const gbSaved = deltaMbps * 0.45 * hrs;
       const netMult = _networkMultiplier(rtt, effectiveType);
       const networkWh = gbSaved * _WH_PER_GB_WIFI * netMult;

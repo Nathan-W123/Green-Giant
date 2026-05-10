@@ -478,11 +478,12 @@ const _YT_BITRATE = {
    360: { 30: 0.8, 60: 1.2 },
 };
 
-// Calibrated network energy per GB (Wh/GB) at WiFi baseline.
-// Derived from IEA 2024: 4K=15 Wh/hr, 1080p=11 Wh/hr → 4 Wh/hr delta.
-// Network+CDN share ≈ 60% = 2.4 Wh/hr / 6.075 GB/hr = 0.395 Wh/GB.
-const _WH_PER_GB_WIFI = 0.395;
-const _MAX_DECODE_W   = 4.0; // max device decode power delta (W), 4K vs minimal
+// Network energy per GB (Wh/GB) at WiFi baseline — comprehensive system boundary
+// including CDN, backbone, and last-mile (Aslan et al. 2018 + Carbon Trust 2021).
+// Calibrated so 1080p/WiFi/30fps → ~25 Wh/hr, consistent with Carbon Trust's
+// ~17 g CO2/hr delta between 4K and HD at UK grid intensity (0.233 kgCO2/kWh).
+const _WH_PER_GB_WIFI = 4.5;
+const _MAX_DECODE_W   = 6.0; // measured GPU/CPU decode power delta (W), 4K vs 1080p
 const _PX_4K          = 3840 * 2160;
 
 // Continuous network multiplier based on measured RTT (ms).
@@ -587,9 +588,8 @@ class EnergyTracker {
 
     // ── Live measurements ────────────────────────────────────────────────────
     const conn          = navigator.connection;
-    const rtt           = conn?.rtt           ?? 50;   // ms
+    const rtt           = conn?.rtt           ?? 50;
     const effectiveType = conn?.effectiveType ?? '4g';
-    const downlink      = conn?.downlink      ?? null; // Mbps, may be null
 
     const height = this._video.videoHeight || 1080;
     const fps    = this._measureFPS();
@@ -597,13 +597,10 @@ class EnergyTracker {
     // ── Bitrate delta (Mbps) ─────────────────────────────────────────────────
     const streamMbps = _ytBitrate(height, fps);
     const fourKMbps  = _ytBitrate(2160,   fps);
-    let   deltaMbps  = Math.max(0, fourKMbps - streamMbps);
-
-    // Cap by measured bandwidth: if the connection can't carry 4K, savings are
-    // limited to what the extra bandwidth headroom actually would have carried.
-    if (downlink !== null && downlink < fourKMbps) {
-      deltaMbps = Math.max(0, Math.min(deltaMbps, downlink - streamMbps));
-    }
+    const deltaMbps  = Math.max(0, fourKMbps - streamMbps);
+    // Note: we don't cap by connection.downlink — Chrome reports it conservatively
+    // (often capped at 10 Mbps regardless of actual speed) which would incorrectly
+    // collapse savings to near-zero on fast connections.
 
     // ── GB not transferred this interval ────────────────────────────────────
     // 1 Mbps over 1 hr = (1e6 bits/s × 3600 s) / 8 / 1e9 = 0.45 GB
