@@ -821,19 +821,22 @@
     480: { 30: 1.5, 60: 2.5 },
     360: { 30: 0.8, 60: 1.2 }
   };
-  var _WH_PER_GB_WIFI = 4.5;
-  var _MAX_DECODE_W = 6;
+  var _WH_PER_GB_FIXED = 2.5;
+  var _WH_PER_GB_4G = 7;
+  var _WH_PER_GB_3G = 18;
+  var _WH_PER_GB_2G = 40;
+  var _MAX_DECODE_W = 5;
   var _PX_4K = 3840 * 2160;
-  function _networkMultiplier(rtt, effectiveType) {
-    let m;
-    if (rtt <= 15) m = 0.9;
-    else if (rtt <= 60) m = 0.9 + (rtt - 15) / 45 * 0.1;
-    else if (rtt <= 150) m = 1 + (rtt - 60) / 90 * 1.2;
-    else if (rtt <= 400) m = 2.2 + (rtt - 150) / 250 * 1.3;
-    else m = 3.5 + Math.min(1, (rtt - 400) / 300) * 1.5;
-    if (effectiveType === "slow-2g" || effectiveType === "2g") m = Math.max(m, 3.5);
-    else if (effectiveType === "3g") m = Math.max(m, 2);
-    return m;
+  function _whPerGb(connType, effectiveType) {
+    if (connType === "wifi" || connType === "ethernet") return _WH_PER_GB_FIXED;
+    if (connType === "cellular") {
+      if (effectiveType === "4g") return _WH_PER_GB_4G;
+      if (effectiveType === "3g") return _WH_PER_GB_3G;
+      return _WH_PER_GB_2G;
+    }
+    if (effectiveType === "4g") return (_WH_PER_GB_FIXED + _WH_PER_GB_4G) / 2;
+    if (effectiveType === "3g") return _WH_PER_GB_3G;
+    return _WH_PER_GB_2G;
   }
   function _ytBitrate(height, fps) {
     const heights = [2160, 1440, 1080, 720, 480, 360];
@@ -851,6 +854,8 @@
       this._onUpdate = null;
       this._lastFrames = null;
       this._lastFrameMs = null;
+      this._lastDecodedBytes = null;
+      this._lastDecodedBytesMs = null;
     }
     async load() {
       return new Promise((resolve) => {
@@ -889,13 +894,15 @@
       this._onUpdate = null;
       this._lastFrames = null;
       this._lastFrameMs = null;
+      this._lastDecodedBytes = null;
+      this._lastDecodedBytesMs = null;
     }
     // Returns a two-line display string: current rate + lifetime total.
     formatDisplay() {
       const total = this._totalWh;
       const rate = this._currentRate;
       const totalStr = total < 0.05 ? null : total < 1e3 ? `${total.toFixed(1)} Wh saved` : `${(total / 1e3).toFixed(3)} kWh saved`;
-      const rateStr = rate >= 0.1 ? `${rate.toFixed(1)} Wh/hr vs 4K` : null;
+      const rateStr = rate >= 0.1 ? `~${rate.toFixed(1)} Wh/hr vs 4K` : null;
       if (!totalStr && !rateStr) return "";
       if (rateStr && totalStr) return `\u2193 ${rateStr} \xB7 ${totalStr} lifetime`;
       return totalStr ?? rateStr;
@@ -911,22 +918,38 @@
       this._startMs = now;
       if (!this._video || this._video.paused || this._video.ended) return;
       const conn = navigator.connection;
-      const rtt = conn?.rtt ?? 50;
+      const connType = conn?.type ?? "unknown";
       const effectiveType = conn?.effectiveType ?? "4g";
       const height = this._video.videoHeight || 1080;
       const fps = this._measureFPS();
-      const streamMbps = _ytBitrate(height, fps);
+      const measuredMbps = this._measureActualBitrateMbps();
+      const streamMbps = measuredMbps !== null ? measuredMbps : _ytBitrate(height, fps);
       const fourKMbps = _ytBitrate(2160, fps);
       const deltaMbps = Math.max(0, fourKMbps - streamMbps);
       const gbSaved = deltaMbps * 0.45 * hrs;
-      const netMult = _networkMultiplier(rtt, effectiveType);
-      const networkWh = gbSaved * _WH_PER_GB_WIFI * netMult;
-      const srcPx = height * 16 / 9 * height;
+      const networkWh = gbSaved * _whPerGb(connType, effectiveType);
+      const srcPx = (this._video.videoWidth || Math.round(height * 16 / 9)) * (this._video.videoHeight || height);
       const deviceWh = _MAX_DECODE_W * Math.max(0, 1 - srcPx / _PX_4K) * hrs;
       const wh = networkWh + deviceWh;
       this._currentRate = hrs > 0 ? wh / hrs : 0;
       this._sessionWh += wh;
       this._totalWh += wh;
+    }
+    // Measures actual compressed stream bitrate from bytes decoded since last tick.
+    // Returns Mbps, or null if the property is unavailable (non-Chrome, or first tick).
+    _measureActualBitrateMbps() {
+      const bytes = this._video.webkitVideoDecodedByteCount;
+      if (typeof bytes !== "number") return null;
+      const now = performance.now();
+      let mbps = null;
+      if (this._lastDecodedBytes !== null && bytes >= this._lastDecodedBytes) {
+        const db = bytes - this._lastDecodedBytes;
+        const dt = (now - this._lastDecodedBytesMs) / 1e3;
+        if (dt >= 2 && db >= 0) mbps = db * 8 / dt / 1e6;
+      }
+      this._lastDecodedBytes = bytes;
+      this._lastDecodedBytesMs = now;
+      return mbps;
     }
     _measureFPS() {
       const video = this._video;

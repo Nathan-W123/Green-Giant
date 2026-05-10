@@ -450,21 +450,20 @@ class BackgroundQualityManager {
 //
 // Each tick takes real measurements and computes Wh saved for that interval:
 //
-//   networkWh = gbSaved × energyPerGB(rtt, effectiveType)
-//   deviceWh  = MAX_DECODE_W × pixelReduction × intervalHrs
-//   totalWh   = networkWh + deviceWh
+//   streamMbps  = video.webkitVideoDecodedByteCount diff (actual) OR table fallback
+//   fourKMbps   = table lookup (counterfactual — what 4K would cost)
+//   gbSaved     = (fourKMbps - streamMbps) × 0.45 GB/Mbps/hr × intervalHrs
+//   networkWh   = gbSaved × _whPerGb(connection.type, connection.effectiveType)
+//   deviceWh    = _MAX_DECODE_W × (1 - srcPixels / _PX_4K) × intervalHrs
+//   totalWh     = networkWh + deviceWh
 //
-// gbSaved: derived from estimated stream bitrate (resolution + live fps) vs 4K,
-//          capped by connection.downlink so we never claim savings on a connection
-//          that couldn't carry 4K anyway.
-//
-// energyPerGB: continuously varying with connection.rtt (piecewise linear) rather
-//              than a discrete category. Calibrated so WiFi at 1080p → ~4 Wh/hr,
-//              matching IEA Electricity 2024 end-to-end system totals.
-//              Baseline: (4 Wh/hr × 0.6 network share) / 6.075 GB/hr ≈ 0.395 Wh/GB
+// Energy-per-GB sources: IEA 2024 (fixed networks) + Malmodin & Lundén 2020
+// (mobile vs fixed ratio). Values represent marginal CDN+backbone+last-mile cost.
 // ============================================================================
 
 // YouTube VP9/AV1 average bitrates (Mbps) by resolution + framerate tier.
+// Used for 4K counterfactual (always) and current stream (when
+// webkitVideoDecodedByteCount is unavailable).
 const _YT_BITRATE = {
   2160: { 30: 16, 60: 24 },
   1440: { 30:  8, 60: 13 },
@@ -474,30 +473,30 @@ const _YT_BITRATE = {
    360: { 30: 0.8, 60: 1.2 },
 };
 
-// Network energy per GB (Wh/GB) at WiFi baseline — comprehensive system boundary
-// including CDN, backbone, and last-mile (Aslan et al. 2018 + Carbon Trust 2021).
-// Calibrated so 1080p/WiFi/30fps → ~25 Wh/hr, consistent with Carbon Trust's
-// ~17 g CO2/hr delta between 4K and HD at UK grid intensity (0.233 kgCO2/kWh).
-const _WH_PER_GB_WIFI = 4.5;
-const _MAX_DECODE_W   = 6.0; // measured GPU/CPU decode power delta (W), 4K vs 1080p
-const _PX_4K          = 3840 * 2160;
+// Wh per GB by connection medium (IEA 2024 + Malmodin 2020 marginal estimates).
+// Fixed (WiFi/ethernet): ~2.5 Wh/GB. Mobile LTE uses ~3× more per GB; 3G/2G more still.
+const _WH_PER_GB_FIXED    = 2.5;
+const _WH_PER_GB_4G       = 7.0;
+const _WH_PER_GB_3G       = 18.0;
+const _WH_PER_GB_2G       = 40.0;
+const _MAX_DECODE_W       = 5.0;  // hardware+software mix decode power delta (W), 4K vs 1080p
+const _PX_4K              = 3840 * 2160;
 
-// Continuous network multiplier based on measured RTT (ms).
-// effectiveType used as a floor/ceiling to prevent RTT noise crossing categories.
-function _networkMultiplier(rtt, effectiveType) {
-  // Piecewise linear: ethernet(~10ms)→0.9, WiFi(~40ms)→1.0, 4G(~80ms)→2.2,
-  //                   3G(~200ms)→3.5, 2G+(>400ms)→5.0
-  let m;
-  if (rtt <= 15)       m = 0.9;
-  else if (rtt <= 60)  m = 0.9  + (rtt - 15)  / 45  * 0.1;   // 0.9 → 1.0
-  else if (rtt <= 150) m = 1.0  + (rtt - 60)  / 90  * 1.2;   // 1.0 → 2.2
-  else if (rtt <= 400) m = 2.2  + (rtt - 150) / 250 * 1.3;   // 2.2 → 3.5
-  else                 m = 3.5  + Math.min(1, (rtt - 400) / 300) * 1.5; // 3.5 → 5.0
-
-  // Clamp to effectiveType floors so a lucky low-RTT reading on 3G doesn't undercount
-  if (effectiveType === 'slow-2g' || effectiveType === '2g') m = Math.max(m, 3.5);
-  else if (effectiveType === '3g')                           m = Math.max(m, 2.0);
-  return m;
+// Return Wh/GB based on connection.type and connection.effectiveType.
+// connection.type ('wifi','ethernet','cellular','unknown') is more reliable than
+// effectiveType alone, which can't distinguish WiFi from LTE on its own.
+function _whPerGb(connType, effectiveType) {
+  if (connType === 'wifi' || connType === 'ethernet') return _WH_PER_GB_FIXED;
+  if (connType === 'cellular') {
+    if (effectiveType === '4g')               return _WH_PER_GB_4G;
+    if (effectiveType === '3g')               return _WH_PER_GB_3G;
+    return _WH_PER_GB_2G;
+  }
+  // Unknown medium: effectiveType gives the best available signal.
+  // '4g' could be LTE or WiFi — use midpoint between fixed and 4G.
+  if (effectiveType === '4g')                 return (_WH_PER_GB_FIXED + _WH_PER_GB_4G) / 2;
+  if (effectiveType === '3g')                 return _WH_PER_GB_3G;
+  return _WH_PER_GB_2G;
 }
 
 function _ytBitrate(height, fps) {
@@ -508,16 +507,19 @@ function _ytBitrate(height, fps) {
 
 class EnergyTracker {
   constructor() {
-    this._startMs     = null;
-    this._video       = null;
-    this._sessionWh   = 0;
-    this._totalWh     = 0;
-    this._currentRate = 0;
-    this._interval    = null;
-    this._onUpdate    = null;
-    // For live FPS estimation via getVideoPlaybackQuality()
-    this._lastFrames  = null;
-    this._lastFrameMs = null;
+    this._startMs          = null;
+    this._video            = null;
+    this._sessionWh        = 0;
+    this._totalWh          = 0;
+    this._currentRate      = 0;
+    this._interval         = null;
+    this._onUpdate         = null;
+    // FPS estimation via getVideoPlaybackQuality()
+    this._lastFrames       = null;
+    this._lastFrameMs      = null;
+    // Actual bitrate measurement via webkitVideoDecodedByteCount
+    this._lastDecodedBytes = null;
+    this._lastDecodedBytesMs = null;
   }
 
   async load() {
@@ -550,11 +552,13 @@ class EnergyTracker {
 
   destroy() {
     this.end();
-    this._sessionWh   = 0;
-    this._currentRate = 0;
-    this._onUpdate    = null;
-    this._lastFrames  = null;
-    this._lastFrameMs = null;
+    this._sessionWh          = 0;
+    this._currentRate        = 0;
+    this._onUpdate           = null;
+    this._lastFrames         = null;
+    this._lastFrameMs        = null;
+    this._lastDecodedBytes   = null;
+    this._lastDecodedBytesMs = null;
   }
 
   // Returns a two-line display string: current rate + lifetime total.
@@ -564,7 +568,7 @@ class EnergyTracker {
     const totalStr = total < 0.05 ? null
       : total < 1000 ? `${total.toFixed(1)} Wh saved`
       : `${(total / 1000).toFixed(3)} kWh saved`;
-    const rateStr = rate >= 0.1 ? `${rate.toFixed(1)} Wh/hr vs 4K` : null;
+    const rateStr = rate >= 0.1 ? `~${rate.toFixed(1)} Wh/hr vs 4K` : null;
     if (!totalStr && !rateStr) return '';
     if (rateStr && totalStr) return `↓ ${rateStr} · ${totalStr} lifetime`;
     return totalStr ?? rateStr;
@@ -582,38 +586,53 @@ class EnergyTracker {
     this._startMs = now;
     if (!this._video || this._video.paused || this._video.ended) return;
 
-    // ── Live measurements ────────────────────────────────────────────────────
+    // ── Connection type (more reliable than RTT for energy lookup) ───────────
     const conn          = navigator.connection;
-    const rtt           = conn?.rtt           ?? 50;
+    const connType      = conn?.type          ?? 'unknown';   // 'wifi','ethernet','cellular',…
     const effectiveType = conn?.effectiveType ?? '4g';
 
-    const height = this._video.videoHeight || 1080;
-    const fps    = this._measureFPS();
-
-    // ── Bitrate delta (Mbps) ─────────────────────────────────────────────────
-    const streamMbps = _ytBitrate(height, fps);
-    const fourKMbps  = _ytBitrate(2160,   fps);
+    // ── Stream bitrate: actual measurement first, table fallback ─────────────
+    const height     = this._video.videoHeight || 1080;
+    const fps        = this._measureFPS();
+    const measuredMbps = this._measureActualBitrateMbps();
+    const streamMbps = measuredMbps !== null ? measuredMbps : _ytBitrate(height, fps);
+    const fourKMbps  = _ytBitrate(2160, fps);
     const deltaMbps  = Math.max(0, fourKMbps - streamMbps);
-    // Note: we don't cap by connection.downlink — Chrome reports it conservatively
-    // (often capped at 10 Mbps regardless of actual speed) which would incorrectly
-    // collapse savings to near-zero on fast connections.
 
-    // ── GB not transferred this interval ────────────────────────────────────
-    // 1 Mbps over 1 hr = (1e6 bits/s × 3600 s) / 8 / 1e9 = 0.45 GB
-    const gbSaved = deltaMbps * 0.45 * hrs;
+    // ── GB not transferred this interval ─────────────────────────────────────
+    // 1 Mbps for 1 hr = (1e6 b/s × 3600 s) / 8 / 1e9 = 0.45 GB
+    const gbSaved   = deltaMbps * 0.45 * hrs;
 
-    // ── Energy calculation ───────────────────────────────────────────────────
-    const netMult    = _networkMultiplier(rtt, effectiveType);
-    const networkWh  = gbSaved * _WH_PER_GB_WIFI * netMult;
+    // ── Network energy: connection-type-specific Wh/GB ───────────────────────
+    const networkWh = gbSaved * _whPerGb(connType, effectiveType);
 
-    // Device decode: scales with pixel-count reduction from 4K baseline
-    const srcPx      = (height * 16 / 9) * height;
-    const deviceWh   = _MAX_DECODE_W * Math.max(0, 1 - srcPx / _PX_4K) * hrs;
+    // ── Device decode energy: actual pixel count, not assumed 16:9 ──────────
+    const srcPx   = (this._video.videoWidth  || Math.round(height * 16 / 9))
+                  * (this._video.videoHeight || height);
+    const deviceWh = _MAX_DECODE_W * Math.max(0, 1 - srcPx / _PX_4K) * hrs;
 
     const wh = networkWh + deviceWh;
     this._currentRate = hrs > 0 ? wh / hrs : 0;
     this._sessionWh  += wh;
     this._totalWh    += wh;
+  }
+
+  // Measures actual compressed stream bitrate from bytes decoded since last tick.
+  // Returns Mbps, or null if the property is unavailable (non-Chrome, or first tick).
+  _measureActualBitrateMbps() {
+    const bytes = this._video.webkitVideoDecodedByteCount;
+    if (typeof bytes !== 'number') return null;
+    const now = performance.now();
+    let mbps = null;
+    if (this._lastDecodedBytes !== null && bytes >= this._lastDecodedBytes) {
+      const db = bytes - this._lastDecodedBytes;
+      const dt = (now - this._lastDecodedBytesMs) / 1000;
+      // Require at least 2s between samples to smooth burstiness
+      if (dt >= 2 && db >= 0) mbps = (db * 8) / dt / 1e6;
+    }
+    this._lastDecodedBytes   = bytes;
+    this._lastDecodedBytesMs = now;
+    return mbps;
   }
 
   _measureFPS() {
