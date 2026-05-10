@@ -403,15 +403,11 @@ class BackgroundQualityManager {
   start(player) {
     this._player = player;
     document.addEventListener('visibilitychange', this._boundUpdate);
-    window.addEventListener('blur', this._boundUpdate);
-    window.addEventListener('focus', this._boundUpdate);
     this._update();
   }
 
   stop() {
     document.removeEventListener('visibilitychange', this._boundUpdate);
-    window.removeEventListener('blur', this._boundUpdate);
-    window.removeEventListener('focus', this._boundUpdate);
     this._restore();
     this._player = null;
   }
@@ -422,7 +418,7 @@ class BackgroundQualityManager {
 
   _update() {
     if (!this._settingsManager.get().enabled) { this._restore(); return; }
-    if (document.hidden || !document.hasFocus()) this._lower();
+    if (document.hidden) this._lower();
     else this._restore();
   }
 
