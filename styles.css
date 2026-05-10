@@ -11,12 +11,167 @@
 }
 
 /* ============================================================
+   Inline YouTube player control
+   ============================================================ */
+
+.eco-upscaler-control.ytp-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 48px;
+  float: left;
+  position: relative;
+  width: 48px;
+  min-width: 48px;
+  max-width: 48px;
+  height: 48px;
+  min-height: 48px;
+  padding: 0;
+  border: 0;
+  background: transparent !important;
+  color: #fff;
+  cursor: pointer;
+  opacity: 0.9;
+  overflow: visible;
+  pointer-events: auto;
+  vertical-align: top;
+  z-index: 70;
+  box-shadow: none !important;
+}
+
+.eco-upscaler-control.ytp-button::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: -2px;
+  width: 36px;
+  height: 34px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.eco-upscaler-control.ytp-button:hover {
+  background: transparent !important;
+  box-shadow: none !important;
+  opacity: 1;
+}
+
+.eco-upscaler-control.ytp-button:hover::before {
+  opacity: 1;
+}
+
+.eco-upscaler-control.ytp-button:focus,
+.eco-upscaler-control.ytp-button:active {
+  background: transparent !important;
+  box-shadow: none !important;
+  outline: none;
+}
+
+.eco-upscaler-control.ytp-button::after {
+  content: none !important;
+  display: none !important;
+}
+
+.eco-upscaler-control .eco-toggle-track {
+  position: absolute;
+  left: 6px;
+  top: 10px;
+  display: block;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.24);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  z-index: 1;
+  transition:
+    background-color 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 360ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.eco-upscaler-control .eco-toggle-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  transform: translateX(0);
+  transition:
+    transform 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 360ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.eco-upscaler-control .eco-toggle-leaf {
+  display: block;
+  width: 11px;
+  height: 11px;
+  background: #5f6368;
+  opacity: 0.9;
+  transform: rotate(-12deg) scale(0.9);
+  transform-origin: 50% 50%;
+  transition:
+    background-color 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 360ms cubic-bezier(0.22, 1, 0.36, 1);
+  -webkit-mask: var(--eco-leaf-url) center / contain no-repeat;
+  mask: var(--eco-leaf-url) center / contain no-repeat;
+}
+
+.eco-upscaler-control.eco-active .eco-toggle-track {
+  background: #2f8f3d;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+
+.eco-upscaler-control.eco-active .eco-toggle-thumb {
+  transform: translateX(16px);
+  background: #fff;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.42);
+}
+
+.eco-upscaler-control.eco-active .eco-toggle-leaf {
+  background: #39a947;
+  opacity: 1;
+  transform: rotate(12deg) scale(1);
+}
+
+.eco-upscaler-control.eco-degraded .eco-toggle-track {
+  background: #d97706;
+}
+
+.eco-upscaler-control.eco-disabled .eco-toggle-track {
+  background: #7f1d1d;
+}
+
+.eco-upscaler-control-host {
+  position: absolute;
+  right: 144px;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  pointer-events: auto;
+  z-index: 70;
+}
+
+/* ============================================================
    Extension popup — popup.html
    ============================================================ */
 
-*,
-*::before,
-*::after {
+.popup-body,
+.popup-body *,
+.popup-body *::before,
+.popup-body *::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
