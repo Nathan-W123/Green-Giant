@@ -197,7 +197,7 @@
       this._activeProgram = this._programs.unsharp;
     }
     _getModeParams() {
-      return { strength: 0.95, radius: 1.25 };
+      return { strength: 0.76, radius: 1.1 };
     }
     _processFrameWebGL() {
       const gl = this._gl;
@@ -630,18 +630,25 @@
       const container = this._player;
       if (!canvas || !container) return;
       const dpr = devicePixelRatio || 1;
-      const w = container.clientWidth;
-      const h = container.clientHeight;
+      const inFS = !!document.fullscreenElement;
+      const w = inFS ? window.innerWidth : container.clientWidth;
+      const h = inFS ? window.innerHeight : container.clientHeight;
       if (w === 0 || h === 0) return;
-      canvas.width = Math.round(w * dpr);
-      canvas.height = Math.round(h * dpr);
+      const pw = Math.round(w * dpr);
+      const ph = Math.round(h * dpr);
+      if (canvas.width !== pw || canvas.height !== ph) {
+        canvas.width = pw;
+        canvas.height = ph;
+      }
     }
     _startResizeObserver() {
       this._resizeObserver = new ResizeObserver(() => this._updateCanvasSize());
       this._resizeObserver.observe(this._player);
     }
     _handleFullscreen() {
-      this._fsHandler = () => this._updateCanvasSize();
+      this._fsHandler = () => requestAnimationFrame(
+        () => requestAnimationFrame(() => this._updateCanvasSize())
+      );
       document.addEventListener("fullscreenchange", this._fsHandler);
     }
     _handleTheaterMode() {
@@ -1335,6 +1342,7 @@ ${totalStr} lifetime`;
           if (enabled) {
             _perfMonitor.reset();
             _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
+            if (video.readyState >= 2) _upscalerPipeline.processFrame();
             _energyTracker && _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
           } else {
             _frameProcessor.stop();
@@ -1368,6 +1376,7 @@ ${totalStr} lifetime`;
         if (all.enabled) {
           _perfMonitor.reset();
           _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
+          if (video.readyState >= 2) _upscalerPipeline.processFrame();
           _energyTracker && _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
         } else {
           _frameProcessor.stop();

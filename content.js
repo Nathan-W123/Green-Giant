@@ -230,12 +230,19 @@ class OverlayManager {
     if (!canvas || !container) return;
 
     const dpr = devicePixelRatio || 1;
-    const w = container.clientWidth;
-    const h = container.clientHeight;
+    // In fullscreen the container's clientWidth can lag behind the actual viewport
+    // during the transition; window.innerWidth/Height is always current.
+    const inFS = !!document.fullscreenElement;
+    const w = inFS ? window.innerWidth  : container.clientWidth;
+    const h = inFS ? window.innerHeight : container.clientHeight;
     if (w === 0 || h === 0) return;
 
-    canvas.width  = Math.round(w * dpr);
-    canvas.height = Math.round(h * dpr);
+    const pw = Math.round(w * dpr);
+    const ph = Math.round(h * dpr);
+    if (canvas.width !== pw || canvas.height !== ph) {
+      canvas.width  = pw;
+      canvas.height = ph;
+    }
   }
 
   _startResizeObserver() {
@@ -244,7 +251,11 @@ class OverlayManager {
   }
 
   _handleFullscreen() {
-    this._fsHandler = () => this._updateCanvasSize();
+    // Double-rAF: fullscreenchange fires before the browser has finished
+    // reflowing the new viewport size; two animation frames guarantee layout settled.
+    this._fsHandler = () => requestAnimationFrame(() =>
+      requestAnimationFrame(() => this._updateCanvasSize())
+    );
     document.addEventListener('fullscreenchange', this._fsHandler);
   }
 
@@ -1018,6 +1029,9 @@ async function _onVideoReady(video, settings) {
         if (enabled) {
           _perfMonitor.reset();
           _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
+          // Force-render immediately so a paused video shows the enhanced frame
+          // rather than leftover canvas content from a previous session.
+          if (video.readyState >= 2) _upscalerPipeline.processFrame();
           _energyTracker && _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
         } else {
           _frameProcessor.stop();
@@ -1056,6 +1070,7 @@ async function _onVideoReady(video, settings) {
       if (all.enabled) {
         _perfMonitor.reset();
         _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
+        if (video.readyState >= 2) _upscalerPipeline.processFrame();
         _energyTracker && _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
       } else {
         _frameProcessor.stop();
