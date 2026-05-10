@@ -197,7 +197,7 @@
       this._activeProgram = this._programs.unsharp;
     }
     _getModeParams() {
-      return { strength: 0.76, radius: 1.1 };
+      return { strength: 0.836, radius: 1.1 };
     }
     _processFrameWebGL() {
       const gl = this._gl;
