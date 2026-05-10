@@ -69,12 +69,9 @@ export class AITileUpscaler {
     const ort = window.ort;
     if (!ort) throw new Error('window.ort not found — ensure lib/ort.min.js loads first');
 
-    // proxy=false: ORT must run on the main thread, not a blob-URL worker.
-    // Workers spawned from blob:// cannot reach chrome-extension:// WASM binaries,
-    // causing silent init failure in all content script contexts.
-    ort.env.wasm.proxy      = false;
+    // WASM is baked into ort.min.js (built from ort.bundle.min.mjs by setup.cjs).
+    // No wasmPaths needed — there is nothing to fetch externally.
     ort.env.wasm.numThreads = 1;
-    ort.env.wasm.wasmPaths  = chrome.runtime.getURL('lib/');
 
     const candidates = [
       { file: 'models/super-resolution-int8.onnx', dtype: 'float32' },
