@@ -817,32 +817,22 @@
       this._savedQuality = null;
     }
   };
-  var _SAVINGS_TABLE = (() => {
-    const BITRATE = { 2160: 20, 1440: 12, 1080: 6.5, 720: 3.5, 480: 2, 360: 1, 0: 6.5 };
-    const KWH_PER_GB = { ethernet: 0.04, wifi: 0.08, "4g": 0.24, cellular: 0.24, "3g": 0.4, "2g": 0.6, unknown: 0.1 };
-    const MAX_DECODE_W = 8;
-    const PX_4K = 3840 * 2160;
-    const heights = [2160, 1440, 1080, 720, 480, 360, 0];
-    const connTypes = Object.keys(KWH_PER_GB);
-    const table = {};
-    for (const h of heights) {
-      table[h] = {};
-      const bitrateDelta = Math.max(0, BITRATE[2160] - (BITRATE[h] ?? BITRATE[0]));
-      const gbPerHr = bitrateDelta * 0.45;
-      const srcPx = h > 0 ? h * 16 / 9 * h : 1080 * 16 / 9 * 1080;
-      const decodeWhPerHr = MAX_DECODE_W * Math.max(0, 1 - srcPx / PX_4K);
-      for (const c of connTypes) {
-        const networkWhPerHr = gbPerHr * (KWH_PER_GB[c] ?? KWH_PER_GB.unknown) * 1e3;
-        table[h][c] = parseFloat((networkWhPerHr + decodeWhPerHr).toFixed(2));
-      }
-    }
-    return table;
-  })();
+  var _BASE_WH_HR = { 2160: 0, 1440: 2, 1080: 4, 720: 7, 480: 9, 360: 10 };
+  var _NET_MULT = {
+    ethernet: 0.9,
+    wifi: 1,
+    "4g": 2.2,
+    cellular: 2.2,
+    "3g": 3.5,
+    "2g": 5,
+    unknown: 1
+  };
   function _lookupRate(videoHeight, connType) {
     const heights = [2160, 1440, 1080, 720, 480, 360];
-    const h = heights.find((t) => videoHeight >= t) ?? 0;
-    const row = _SAVINGS_TABLE[h] ?? _SAVINGS_TABLE[0];
-    return row[connType] ?? row.unknown;
+    const h = heights.find((t) => videoHeight >= t) ?? 360;
+    const base = _BASE_WH_HR[h] ?? 4;
+    const mult = _NET_MULT[connType] ?? 1;
+    return parseFloat((base * (0.4 + 0.6 * mult)).toFixed(2));
   }
   function _connectionType() {
     const conn = navigator.connection;
