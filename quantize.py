@@ -30,7 +30,7 @@ try:
     model    = onnx.load(str(SRC))
     fp16_model = float16.convert_float_to_float16(model, keep_io_types=True)
     onnx.save(fp16_model, str(FP16))
-    print(f'[quantize] FP16 → {FP16}  ({FP16.stat().st_size // 1024} KB)')
+    print(f'[quantize] FP16 -> {FP16}  ({FP16.stat().st_size // 1024} KB)')
 except Exception as e:
     print(f'[quantize] FP16 failed: {e}')
 
@@ -47,6 +47,6 @@ try:
         nodes_to_exclude=[],
         per_channel=False,
     )
-    print(f'[quantize] INT8 → {INT8}  ({INT8.stat().st_size // 1024} KB)')
+    print(f'[quantize] INT8 -> {INT8}  ({INT8.stat().st_size // 1024} KB)')
 except Exception as e:
     print(f'[quantize] INT8 failed: {e}')
