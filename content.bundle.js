@@ -273,7 +273,6 @@
 
   // ai-upscaler.js
   var MODEL_IN = 224;
-  var AI_INTERVAL_MS = 250;
   var GAUSS = [
     1 / 16,
     2 / 16,
@@ -292,7 +291,6 @@
       this._canvas = null;
       this._ctx = null;
       this._ready = false;
-      this._lastMs = 0;
       this._scratch = document.createElement("canvas");
       this._sctx = this._scratch.getContext("2d", { willReadFrequently: true });
     }
@@ -313,9 +311,6 @@
     }
     async processFrame() {
       if (!this._ready) return;
-      const now = performance.now();
-      if (now - this._lastMs < AI_INTERVAL_MS) return;
-      this._lastMs = now;
       const video = this._video;
       if (!video || video.paused || video.readyState < 2) return;
       this._syncSize();

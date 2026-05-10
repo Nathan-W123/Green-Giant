@@ -1,11 +1,10 @@
 // AI full-frame enhancement layer.
-// Two-pass render: (1) draw the video at full canvas resolution so quality is
-// preserved, then (2) composite a 224×224 luma-USM sharpening delta onto it
-// using Canvas 'overlay' blend — edges sharpen, flat areas unchanged.
-// Pure JS/Canvas 2D, no WASM. Runs at 4 fps.
+// Composites a 224×224 luma-USM sharpening delta onto the WebGL canvas below
+// using CSS mix-blend-mode:overlay. Runs at video frame rate (no throttle) so
+// the delta always matches the current frame and there's no ghost/double-edge.
+// Pure JS/Canvas 2D, no WASM. ~3 ms per frame at 224×224.
 
-const MODEL_IN       = 224;  // USM analysis resolution
-const AI_INTERVAL_MS = 250;  // 4 fps
+const MODEL_IN = 224;  // USM analysis resolution
 
 // 3×3 Gaussian kernel (sigma ≈ 0.85)
 const GAUSS = [
@@ -21,7 +20,6 @@ export class AITileUpscaler {
     this._canvas    = null;
     this._ctx       = null;
     this._ready     = false;
-    this._lastMs    = 0;
     this._scratch   = document.createElement('canvas');
     this._sctx      = this._scratch.getContext('2d', { willReadFrequently: true });
   }
@@ -43,13 +41,8 @@ export class AITileUpscaler {
 
   async processFrame() {
     if (!this._ready) return;
-    const now = performance.now();
-    if (now - this._lastMs < AI_INTERVAL_MS) return;
-    this._lastMs = now;
-
     const video = this._video;
     if (!video || video.paused || video.readyState < 2) return;
-
     this._syncSize();
     this._enhanceFullFrame(video);
   }
