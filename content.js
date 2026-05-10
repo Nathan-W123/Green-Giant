@@ -450,59 +450,77 @@ class BackgroundQualityManager {
 }
 
 // ============================================================================
-// EnergyTracker — dynamic statistical energy savings model.
+// EnergyTracker — live statistical energy savings model.
 //
-// Source: IEA "Electricity 2024" end-to-end streaming energy (device + network + CDN):
-//   4K: ~15 Wh/hr,  1080p: ~11 Wh/hr,  720p: ~8 Wh/hr,  SD: ~7 Wh/hr
-// These totals already include all system components, so we work from them directly
-// rather than summing per-GB infrastructure figures (which double-count and overstate).
+// Each tick takes real measurements and computes Wh saved for that interval:
 //
-// Connection type adjusts only the ~60% network+CDN portion of the delta.
-// Device decode (~40%) is connection-agnostic.
+//   networkWh = gbSaved × energyPerGB(rtt, effectiveType)
+//   deviceWh  = MAX_DECODE_W × pixelReduction × intervalHrs
+//   totalWh   = networkWh + deviceWh
+//
+// gbSaved: derived from estimated stream bitrate (resolution + live fps) vs 4K,
+//          capped by connection.downlink so we never claim savings on a connection
+//          that couldn't carry 4K anyway.
+//
+// energyPerGB: continuously varying with connection.rtt (piecewise linear) rather
+//              than a discrete category. Calibrated so WiFi at 1080p → ~4 Wh/hr,
+//              matching IEA Electricity 2024 end-to-end system totals.
+//              Baseline: (4 Wh/hr × 0.6 network share) / 6.075 GB/hr ≈ 0.395 Wh/GB
 // ============================================================================
 
-// Wh/hr saved vs streaming native 4K, WiFi baseline (IEA 2024)
-const _BASE_WH_HR = { 2160: 0, 1440: 2, 1080: 4, 720: 7, 480: 9, 360: 10 };
-
-// Multiplier on the network+CDN share of savings by connection type.
-// WiFi = 1.0 baseline; cellular is ~2-3x more energy-intensive per bit transferred.
-const _NET_MULT = {
-  ethernet: 0.9, wifi: 1.0, '4g': 2.2, cellular: 2.2, '3g': 3.5, '2g': 5.0, unknown: 1.0,
+// YouTube VP9/AV1 average bitrates (Mbps) by resolution + framerate tier.
+const _YT_BITRATE = {
+  2160: { 30: 16, 60: 24 },
+  1440: { 30:  8, 60: 13 },
+  1080: { 30:  5, 60:  8 },
+   720: { 30:  3, 60:  5 },
+   480: { 30: 1.5, 60: 2.5 },
+   360: { 30: 0.8, 60: 1.2 },
 };
 
-function _lookupRate(videoHeight, connType) {
-  const heights = [2160, 1440, 1080, 720, 480, 360];
-  const h    = heights.find(t => videoHeight >= t) ?? 360;
-  const base = _BASE_WH_HR[h] ?? 4;
-  const mult = _NET_MULT[connType] ?? 1.0;
-  // 40% device component (fixed) + 60% network component (scales with connection)
-  return parseFloat((base * (0.4 + 0.6 * mult)).toFixed(2));
+// Calibrated network energy per GB (Wh/GB) at WiFi baseline.
+// Derived from IEA 2024: 4K=15 Wh/hr, 1080p=11 Wh/hr → 4 Wh/hr delta.
+// Network+CDN share ≈ 60% = 2.4 Wh/hr / 6.075 GB/hr = 0.395 Wh/GB.
+const _WH_PER_GB_WIFI = 0.395;
+const _MAX_DECODE_W   = 4.0; // max device decode power delta (W), 4K vs minimal
+const _PX_4K          = 3840 * 2160;
+
+// Continuous network multiplier based on measured RTT (ms).
+// effectiveType used as a floor/ceiling to prevent RTT noise crossing categories.
+function _networkMultiplier(rtt, effectiveType) {
+  // Piecewise linear: ethernet(~10ms)→0.9, WiFi(~40ms)→1.0, 4G(~80ms)→2.2,
+  //                   3G(~200ms)→3.5, 2G+(>400ms)→5.0
+  let m;
+  if (rtt <= 15)       m = 0.9;
+  else if (rtt <= 60)  m = 0.9  + (rtt - 15)  / 45  * 0.1;   // 0.9 → 1.0
+  else if (rtt <= 150) m = 1.0  + (rtt - 60)  / 90  * 1.2;   // 1.0 → 2.2
+  else if (rtt <= 400) m = 2.2  + (rtt - 150) / 250 * 1.3;   // 2.2 → 3.5
+  else                 m = 3.5  + Math.min(1, (rtt - 400) / 300) * 1.5; // 3.5 → 5.0
+
+  // Clamp to effectiveType floors so a lucky low-RTT reading on 3G doesn't undercount
+  if (effectiveType === 'slow-2g' || effectiveType === '2g') m = Math.max(m, 3.5);
+  else if (effectiveType === '3g')                           m = Math.max(m, 2.0);
+  return m;
 }
 
-function _connectionType() {
-  const conn = navigator.connection;
-  if (!conn) return 'unknown';
-  // effectiveType ('slow-2g','2g','3g','4g') takes precedence over type
-  const et = conn.effectiveType;
-  if (et === '4g') return '4g';
-  if (et === '3g') return '3g';
-  if (et === '2g' || et === 'slow-2g') return '2g';
-  const t = conn.type;
-  if (t === 'ethernet') return 'ethernet';
-  if (t === 'wifi') return 'wifi';
-  if (t === 'cellular') return 'cellular';
-  return 'unknown';
+function _ytBitrate(height, fps) {
+  const heights = [2160, 1440, 1080, 720, 480, 360];
+  const h = heights.find(t => height >= t) ?? 360;
+  return _YT_BITRATE[h]?.[fps > 35 ? 60 : 30] ?? 5;
 }
 
 class EnergyTracker {
   constructor() {
-    this._startMs  = null;
-    this._video    = null;
-    this._sessionWh = 0;
-    this._totalWh  = 0;
-    this._currentRate = 0; // Wh/hr, updated each flush
-    this._interval = null;
-    this._onUpdate = null;
+    this._startMs     = null;
+    this._video       = null;
+    this._sessionWh   = 0;
+    this._totalWh     = 0;
+    this._currentRate = 0;
+    this._interval    = null;
+    this._onUpdate    = null;
+    // For live FPS estimation via getVideoPlaybackQuality()
+    this._lastFrames  = null;
+    this._lastFrameMs = null;
   }
 
   async load() {
@@ -535,9 +553,11 @@ class EnergyTracker {
 
   destroy() {
     this.end();
-    this._sessionWh  = 0;
+    this._sessionWh   = 0;
     this._currentRate = 0;
-    this._onUpdate   = null;
+    this._onUpdate    = null;
+    this._lastFrames  = null;
+    this._lastFrameMs = null;
   }
 
   // Returns a two-line display string: current rate + lifetime total.
@@ -563,14 +583,61 @@ class EnergyTracker {
     const now = Date.now();
     const hrs = (now - this._startMs) / 3_600_000;
     this._startMs = now;
-    // Only count time while the video is actually playing
     if (!this._video || this._video.paused || this._video.ended) return;
-    const height   = this._video.videoHeight || 1080;
-    const connType = _connectionType();
-    this._currentRate = _lookupRate(height, connType);
-    const wh = hrs * this._currentRate;
-    this._sessionWh += wh;
-    this._totalWh   += wh;
+
+    // ── Live measurements ────────────────────────────────────────────────────
+    const conn          = navigator.connection;
+    const rtt           = conn?.rtt           ?? 50;   // ms
+    const effectiveType = conn?.effectiveType ?? '4g';
+    const downlink      = conn?.downlink      ?? null; // Mbps, may be null
+
+    const height = this._video.videoHeight || 1080;
+    const fps    = this._measureFPS();
+
+    // ── Bitrate delta (Mbps) ─────────────────────────────────────────────────
+    const streamMbps = _ytBitrate(height, fps);
+    const fourKMbps  = _ytBitrate(2160,   fps);
+    let   deltaMbps  = Math.max(0, fourKMbps - streamMbps);
+
+    // Cap by measured bandwidth: if the connection can't carry 4K, savings are
+    // limited to what the extra bandwidth headroom actually would have carried.
+    if (downlink !== null && downlink < fourKMbps) {
+      deltaMbps = Math.max(0, Math.min(deltaMbps, downlink - streamMbps));
+    }
+
+    // ── GB not transferred this interval ────────────────────────────────────
+    // 1 Mbps over 1 hr = (1e6 bits/s × 3600 s) / 8 / 1e9 = 0.45 GB
+    const gbSaved = deltaMbps * 0.45 * hrs;
+
+    // ── Energy calculation ───────────────────────────────────────────────────
+    const netMult    = _networkMultiplier(rtt, effectiveType);
+    const networkWh  = gbSaved * _WH_PER_GB_WIFI * netMult;
+
+    // Device decode: scales with pixel-count reduction from 4K baseline
+    const srcPx      = (height * 16 / 9) * height;
+    const deviceWh   = _MAX_DECODE_W * Math.max(0, 1 - srcPx / _PX_4K) * hrs;
+
+    const wh = networkWh + deviceWh;
+    this._currentRate = hrs > 0 ? wh / hrs : 0;
+    this._sessionWh  += wh;
+    this._totalWh    += wh;
+  }
+
+  _measureFPS() {
+    const video = this._video;
+    const q     = video.getVideoPlaybackQuality?.();
+    if (!q) return 30;
+    const frames = q.totalVideoFrames;
+    const now    = performance.now();
+    let fps = 30;
+    if (this._lastFrames !== null && this._lastFrameMs !== null) {
+      const df = frames - this._lastFrames;
+      const dt = (now - this._lastFrameMs) / 1000;
+      if (dt > 0 && df > 0) fps = df / dt;
+    }
+    this._lastFrames  = frames;
+    this._lastFrameMs = now;
+    return fps;
   }
 
   _persist() {

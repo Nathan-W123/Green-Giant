@@ -817,35 +817,32 @@
       this._savedQuality = null;
     }
   };
-  var _BASE_WH_HR = { 2160: 0, 1440: 2, 1080: 4, 720: 7, 480: 9, 360: 10 };
-  var _NET_MULT = {
-    ethernet: 0.9,
-    wifi: 1,
-    "4g": 2.2,
-    cellular: 2.2,
-    "3g": 3.5,
-    "2g": 5,
-    unknown: 1
+  var _YT_BITRATE = {
+    2160: { 30: 16, 60: 24 },
+    1440: { 30: 8, 60: 13 },
+    1080: { 30: 5, 60: 8 },
+    720: { 30: 3, 60: 5 },
+    480: { 30: 1.5, 60: 2.5 },
+    360: { 30: 0.8, 60: 1.2 }
   };
-  function _lookupRate(videoHeight, connType) {
-    const heights = [2160, 1440, 1080, 720, 480, 360];
-    const h = heights.find((t) => videoHeight >= t) ?? 360;
-    const base = _BASE_WH_HR[h] ?? 4;
-    const mult = _NET_MULT[connType] ?? 1;
-    return parseFloat((base * (0.4 + 0.6 * mult)).toFixed(2));
+  var _WH_PER_GB_WIFI = 0.395;
+  var _MAX_DECODE_W = 4;
+  var _PX_4K = 3840 * 2160;
+  function _networkMultiplier(rtt, effectiveType) {
+    let m;
+    if (rtt <= 15) m = 0.9;
+    else if (rtt <= 60) m = 0.9 + (rtt - 15) / 45 * 0.1;
+    else if (rtt <= 150) m = 1 + (rtt - 60) / 90 * 1.2;
+    else if (rtt <= 400) m = 2.2 + (rtt - 150) / 250 * 1.3;
+    else m = 3.5 + Math.min(1, (rtt - 400) / 300) * 1.5;
+    if (effectiveType === "slow-2g" || effectiveType === "2g") m = Math.max(m, 3.5);
+    else if (effectiveType === "3g") m = Math.max(m, 2);
+    return m;
   }
-  function _connectionType() {
-    const conn = navigator.connection;
-    if (!conn) return "unknown";
-    const et = conn.effectiveType;
-    if (et === "4g") return "4g";
-    if (et === "3g") return "3g";
-    if (et === "2g" || et === "slow-2g") return "2g";
-    const t = conn.type;
-    if (t === "ethernet") return "ethernet";
-    if (t === "wifi") return "wifi";
-    if (t === "cellular") return "cellular";
-    return "unknown";
+  function _ytBitrate(height, fps) {
+    const heights = [2160, 1440, 1080, 720, 480, 360];
+    const h = heights.find((t) => height >= t) ?? 360;
+    return _YT_BITRATE[h]?.[fps > 35 ? 60 : 30] ?? 5;
   }
   var EnergyTracker = class {
     constructor() {
@@ -856,6 +853,8 @@
       this._currentRate = 0;
       this._interval = null;
       this._onUpdate = null;
+      this._lastFrames = null;
+      this._lastFrameMs = null;
     }
     async load() {
       return new Promise((resolve) => {
@@ -892,6 +891,8 @@
       this._sessionWh = 0;
       this._currentRate = 0;
       this._onUpdate = null;
+      this._lastFrames = null;
+      this._lastFrameMs = null;
     }
     // Returns a two-line display string: current rate + lifetime total.
     formatDisplay() {
@@ -913,12 +914,43 @@
       const hrs = (now - this._startMs) / 36e5;
       this._startMs = now;
       if (!this._video || this._video.paused || this._video.ended) return;
+      const conn = navigator.connection;
+      const rtt = conn?.rtt ?? 50;
+      const effectiveType = conn?.effectiveType ?? "4g";
+      const downlink = conn?.downlink ?? null;
       const height = this._video.videoHeight || 1080;
-      const connType = _connectionType();
-      this._currentRate = _lookupRate(height, connType);
-      const wh = hrs * this._currentRate;
+      const fps = this._measureFPS();
+      const streamMbps = _ytBitrate(height, fps);
+      const fourKMbps = _ytBitrate(2160, fps);
+      let deltaMbps = Math.max(0, fourKMbps - streamMbps);
+      if (downlink !== null && downlink < fourKMbps) {
+        deltaMbps = Math.max(0, Math.min(deltaMbps, downlink - streamMbps));
+      }
+      const gbSaved = deltaMbps * 0.45 * hrs;
+      const netMult = _networkMultiplier(rtt, effectiveType);
+      const networkWh = gbSaved * _WH_PER_GB_WIFI * netMult;
+      const srcPx = height * 16 / 9 * height;
+      const deviceWh = _MAX_DECODE_W * Math.max(0, 1 - srcPx / _PX_4K) * hrs;
+      const wh = networkWh + deviceWh;
+      this._currentRate = hrs > 0 ? wh / hrs : 0;
       this._sessionWh += wh;
       this._totalWh += wh;
+    }
+    _measureFPS() {
+      const video = this._video;
+      const q = video.getVideoPlaybackQuality?.();
+      if (!q) return 30;
+      const frames = q.totalVideoFrames;
+      const now = performance.now();
+      let fps = 30;
+      if (this._lastFrames !== null && this._lastFrameMs !== null) {
+        const df = frames - this._lastFrames;
+        const dt = (now - this._lastFrameMs) / 1e3;
+        if (dt > 0 && df > 0) fps = df / dt;
+      }
+      this._lastFrames = frames;
+      this._lastFrameMs = now;
+      return fps;
     }
     _persist() {
       try {
