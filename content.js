@@ -452,58 +452,31 @@ class BackgroundQualityManager {
 // ============================================================================
 // EnergyTracker — dynamic statistical energy savings model.
 //
-// Sources blended into the lookup table:
-//   • IEA "Electricity 2024" — device decode power by resolution tier
-//   • Carbon Trust "Streaming" (2021) — end-to-end network + CDN energy
-//   • Malmodin & Lundén (2018) — energy intensity per GB by access type
+// Source: IEA "Electricity 2024" end-to-end streaming energy (device + network + CDN):
+//   4K: ~15 Wh/hr,  1080p: ~11 Wh/hr,  720p: ~8 Wh/hr,  SD: ~7 Wh/hr
+// These totals already include all system components, so we work from them directly
+// rather than summing per-GB infrastructure figures (which double-count and overstate).
 //
-// Model structure (Wh/hr saved vs streaming the same content at native 4K):
-//   savings = device_savings(sourceHeight) + network_savings(bitrateDelta, connType)
-//
-// Network savings: Δbitrate (Mbps) × 0.45 GB/Mbps/hr × kWh_per_GB × 1000
-//   kWh/GB: ethernet 0.04, wifi 0.08, 4g 0.24, 3g 0.40, 2g 0.60, unknown 0.10
-// Device savings: linear with pixel-count reduction from 4K baseline (≈8 W max delta)
-//
-// Both are pre-computed into _SAVINGS_TABLE for O(1) lookup per tick.
+// Connection type adjusts only the ~60% network+CDN portion of the delta.
+// Device decode (~40%) is connection-agnostic.
 // ============================================================================
 
-const _SAVINGS_TABLE = (() => {
-  // YouTube average bitrates (Mbps) per height tier
-  const BITRATE = { 2160: 20, 1440: 12, 1080: 6.5, 720: 3.5, 480: 2, 360: 1, 0: 6.5 };
+// Wh/hr saved vs streaming native 4K, WiFi baseline (IEA 2024)
+const _BASE_WH_HR = { 2160: 0, 1440: 2, 1080: 4, 720: 7, 480: 9, 360: 10 };
 
-  // Network energy intensity (kWh per GB transferred), includes last-mile + CDN
-  const KWH_PER_GB = { ethernet: 0.04, wifi: 0.08, '4g': 0.24, cellular: 0.24, '3g': 0.40, '2g': 0.60, unknown: 0.10 };
-
-  // Max additional GPU/CPU decode power for 4K vs minimal (W)
-  const MAX_DECODE_W = 8;
-  const PX_4K = 3840 * 2160;
-
-  const heights = [2160, 1440, 1080, 720, 480, 360, 0];
-  const connTypes = Object.keys(KWH_PER_GB);
-  const table = {};
-
-  for (const h of heights) {
-    table[h] = {};
-    const bitrateDelta = Math.max(0, BITRATE[2160] - (BITRATE[h] ?? BITRATE[0]));
-    const gbPerHr = bitrateDelta * 0.45; // 1 Mbps × 3600s / 8 / 1000 ≈ 0.45 GB/hr
-
-    // Pixel-count ratio vs 4K; assume 16:9 source
-    const srcPx = h > 0 ? (h * 16 / 9) * h : (1080 * 16 / 9) * 1080;
-    const decodeWhPerHr = MAX_DECODE_W * Math.max(0, 1 - srcPx / PX_4K);
-
-    for (const c of connTypes) {
-      const networkWhPerHr = gbPerHr * (KWH_PER_GB[c] ?? KWH_PER_GB.unknown) * 1000;
-      table[h][c] = parseFloat((networkWhPerHr + decodeWhPerHr).toFixed(2));
-    }
-  }
-  return table;
-})();
+// Multiplier on the network+CDN share of savings by connection type.
+// WiFi = 1.0 baseline; cellular is ~2-3x more energy-intensive per bit transferred.
+const _NET_MULT = {
+  ethernet: 0.9, wifi: 1.0, '4g': 2.2, cellular: 2.2, '3g': 3.5, '2g': 5.0, unknown: 1.0,
+};
 
 function _lookupRate(videoHeight, connType) {
   const heights = [2160, 1440, 1080, 720, 480, 360];
-  const h = heights.find(t => videoHeight >= t) ?? 0;
-  const row = _SAVINGS_TABLE[h] ?? _SAVINGS_TABLE[0];
-  return row[connType] ?? row.unknown;
+  const h    = heights.find(t => videoHeight >= t) ?? 360;
+  const base = _BASE_WH_HR[h] ?? 4;
+  const mult = _NET_MULT[connType] ?? 1.0;
+  // 40% device component (fixed) + 60% network component (scales with connection)
+  return parseFloat((base * (0.4 + 0.6 * mult)).toFixed(2));
 }
 
 function _connectionType() {
