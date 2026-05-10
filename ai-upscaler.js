@@ -71,6 +71,7 @@ export class AITileUpscaler {
 
     ort.env.wasm.wasmPaths  = chrome.runtime.getURL('lib/');
     ort.env.wasm.numThreads = 1;
+    ort.env.wasm.simd       = true;
 
     const candidates = [
       { file: 'models/super-resolution-fp16.onnx', dtype: 'float16' },
@@ -89,8 +90,11 @@ export class AITileUpscaler {
     }
     if (!modelUrl) throw new Error('No model file found in models/');
 
+    // WebGL EP is unreliable in content script isolated worlds (GPU sandbox differs
+    // from page JS context). WASM with SIMD is fully reliable and plenty fast for
+    // 224x224 inference at 4fps.
     this._session    = await ort.InferenceSession.create(modelUrl, {
-      executionProviders:     ['webgl', 'wasm'],
+      executionProviders:     ['wasm'],
       graphOptimizationLevel: 'all',
     });
     this._inputDtype = dtype;

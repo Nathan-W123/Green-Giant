@@ -340,6 +340,7 @@
       if (!ort) throw new Error("window.ort not found \u2014 ensure lib/ort.min.js loads first");
       ort.env.wasm.wasmPaths = chrome.runtime.getURL("lib/");
       ort.env.wasm.numThreads = 1;
+      ort.env.wasm.simd = true;
       const candidates = [
         { file: "models/super-resolution-fp16.onnx", dtype: "float16" },
         { file: "models/super-resolution-int8.onnx", dtype: "float32" },
@@ -361,7 +362,7 @@
       }
       if (!modelUrl) throw new Error("No model file found in models/");
       this._session = await ort.InferenceSession.create(modelUrl, {
-        executionProviders: ["webgl", "wasm"],
+        executionProviders: ["wasm"],
         graphOptimizationLevel: "all"
       });
       this._inputDtype = dtype;
