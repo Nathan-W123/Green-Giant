@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "YouTube Eco Upscaler",
+  "name": "Green Giant",
+  "short_name": "Green Giant",
   "version": "0.1.0",
-  "description": "Lightweight natural video enhancement for YouTube. Watch 1080p, see closer to 4K.",
+  "description": "Realtime clean video enhancement for YouTube.",
   "permissions": ["storage"],
   "host_permissions": ["https://www.youtube.com/*"],
   "minimum_chrome_version": "88",
@@ -22,7 +23,7 @@
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     },
-    "default_title": "YouTube Eco Upscaler"
+    "default_title": "Green Giant"
   },
   "web_accessible_resources": [
     {

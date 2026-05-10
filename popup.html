@@ -3,40 +3,35 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>YouTube Eco Upscaler</title>
+  <title>Green Giant</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body class="popup-body">
-  <div class="popup-header">
-    <img src="icons/icon48.png" alt="" width="22" height="22" class="popup-icon">
-    <span class="popup-title">Eco Upscaler</span>
-  </div>
-
-  <div class="popup-section">
-    <div class="popup-row">
-      <label class="popup-label" for="popup-toggle">Enhancement</label>
-      <label class="popup-switch">
-        <input type="checkbox" id="popup-toggle">
-        <span class="popup-slider"></span>
-      </label>
+  <div class="leaflet-card">
+    <div class="leaflet-card-top">
+      <span class="leaflet-kicker">You're at</span>
+      <span id="leaflet-delta" class="leaflet-delta">+0</span>
     </div>
 
-    <div class="popup-row">
-      <label class="popup-label" for="popup-mode">Mode</label>
-      <select id="popup-mode" class="popup-select">
-        <option value="smooth">Smooth</option>
-        <option value="balanced" selected>Balanced</option>
-        <option value="sharp">Sharp</option>
-      </select>
+    <div class="leaflet-score-row">
+      <img src="icons/icon48.png" alt="" width="32" height="32" class="leaflet-icon">
+      <div class="leaflet-score-wrap">
+        <span id="leaflet-score" class="leaflet-score">0</span>
+        <span class="leaflet-unit">leaflets</span>
+      </div>
     </div>
 
-    <div class="popup-row">
-      <span class="popup-label">Status</span>
-      <span id="popup-status" class="popup-status-badge">—</span>
+    <div id="leaflet-playback" class="leaflet-playback">~0hrs greener playback</div>
+
+    <div class="task-section">
+      <div class="task-title">Current task:</div>
+      <div id="task-pill" class="task-pill idle">
+        <span class="task-dot"></span>
+        <span id="task-text">Just chilling</span>
+        <img id="task-youtube" src="icons/Youtube_icon.png" alt="" class="task-youtube">
+      </div>
     </div>
   </div>
-
-  <p id="popup-hint" class="popup-hint">Open a YouTube video to activate.</p>
 
   <script src="popup.js"></script>
 </body>
