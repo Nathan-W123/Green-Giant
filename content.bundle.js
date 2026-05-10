@@ -271,138 +271,63 @@
     }
   };
 
-  // ai-upscaler.js
-  var MODEL_IN = 224;
-  var GAUSS = [
-    1 / 16,
-    2 / 16,
-    1 / 16,
-    2 / 16,
-    4 / 16,
-    2 / 16,
-    1 / 16,
-    2 / 16,
-    1 / 16
-  ];
-  var AITileUpscaler = class {
-    constructor(container, video) {
-      this._container = container;
-      this._video = video;
-      this._canvas = null;
-      this._ctx = null;
-      this._ready = false;
-      this._scratch = document.createElement("canvas");
-      this._sctx = this._scratch.getContext("2d", { willReadFrequently: true });
-    }
-    async init() {
-      try {
-        this._createCanvas();
-        this._ready = true;
-        console.log("[EcoUpscaler] AI upscaler ready (luma-USM overlay mode).");
-        return true;
-      } catch (e) {
-        console.error("[EcoUpscaler] AI init failed:", e.message);
-        this._ready = false;
-        return false;
-      }
-    }
-    get isReady() {
-      return this._ready;
-    }
-    async processFrame() {
-      if (!this._ready) return;
-      const video = this._video;
-      if (!video || video.paused || video.readyState < 2) return;
-      this._syncSize();
-      this._enhanceFullFrame(video);
-    }
-    resize() {
-      this._syncSize();
-    }
-    setVisible(visible) {
-      if (!this._canvas) return;
-      this._canvas.style.display = visible ? "" : "none";
-      if (!visible && this._ctx) {
-        this._ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
-      }
-    }
-    destroy() {
-      this._ready = false;
-      if (this._canvas) {
-        this._canvas.remove();
-        this._canvas = null;
-      }
-    }
-    // ── private ────────────────────────────────────────────────────────────────
-    _createCanvas() {
-      const canvas = document.createElement("canvas");
-      canvas.id = "eco-ai-overlay";
-      Object.assign(canvas.style, {
-        position: "absolute",
-        top: "0",
-        left: "0",
-        width: "100%",
-        height: "100%",
-        pointerEvents: "none",
-        zIndex: "51",
-        // 'overlay' blend: neutral gray (128) has zero effect on pixels below;
-        // values above/below 128 sharpen edges. This lets the WebGL canvas show
-        // through at 60 fps — only the AI delta is composited on top at 4 fps.
-        mixBlendMode: "overlay"
-      });
-      this._container.appendChild(canvas);
-      this._canvas = canvas;
-      this._ctx = canvas.getContext("2d");
-      this._syncSize();
-    }
-    _syncSize() {
-      if (!this._canvas) return;
-      const dpr = devicePixelRatio || 1;
-      const w = Math.round(this._container.clientWidth * dpr);
-      const h = Math.round(this._container.clientHeight * dpr);
-      if (this._canvas.width !== w || this._canvas.height !== h) {
-        this._canvas.width = w;
-        this._canvas.height = h;
-      }
-    }
-    _enhanceFullFrame(video) {
-      const W = this._canvas.width;
-      const H = this._canvas.height;
-      const N = MODEL_IN;
-      this._scratch.width = N;
-      this._scratch.height = N;
-      this._sctx.drawImage(video, 0, 0, N, N);
-      const src = this._sctx.getImageData(0, 0, N, N).data;
-      const out = new Uint8ClampedArray(N * N * 4);
-      const USM_STRENGTH = 1.4;
-      for (let y = 0; y < N; y++) {
-        for (let x = 0; x < N; x++) {
-          const i = (y * N + x) * 4;
-          const origY = 0.299 * src[i] + 0.587 * src[i + 1] + 0.114 * src[i + 2];
-          let blurY = 0, k = 0;
-          for (let dy = -1; dy <= 1; dy++) {
-            for (let dx = -1; dx <= 1; dx++) {
-              const ny = Math.min(N - 1, Math.max(0, y + dy));
-              const nx = Math.min(N - 1, Math.max(0, x + dx));
-              const j = (ny * N + nx) * 4;
-              blurY += (0.299 * src[j] + 0.587 * src[j + 1] + 0.114 * src[j + 2]) * GAUSS[k++];
-            }
-          }
-          const encoded = Math.min(255, Math.max(0, 128 + (origY - blurY) * USM_STRENGTH));
-          out[i] = encoded;
-          out[i + 1] = encoded;
-          out[i + 2] = encoded;
-          out[i + 3] = 255;
-        }
-      }
-      this._sctx.putImageData(new ImageData(out, N, N), 0, 0);
-      this._ctx.imageSmoothingEnabled = true;
-      this._ctx.imageSmoothingQuality = "high";
-      this._ctx.drawImage(this._scratch, 0, 0, W, H);
-    }
-  };
-
   // content.js
+  function getDisplayedVideoRect(video, container) {
+    if (!video || !container) return null;
+    const videoRect = video.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    if (videoRect.width <= 0 || videoRect.height <= 0) return null;
+    const dpr = devicePixelRatio || 1;
+    const sourceWidth = video.videoWidth || 0;
+    const sourceHeight = video.videoHeight || 0;
+    const baseLeft = videoRect.left - containerRect.left;
+    const baseTop = videoRect.top - containerRect.top;
+    if (sourceWidth <= 0 || sourceHeight <= 0) {
+      return {
+        cssLeft: baseLeft,
+        cssTop: baseTop,
+        cssWidth: videoRect.width,
+        cssHeight: videoRect.height,
+        pixelWidth: Math.max(1, Math.round(videoRect.width * dpr)),
+        pixelHeight: Math.max(1, Math.round(videoRect.height * dpr)),
+        dpr
+      };
+    }
+    const style = getComputedStyle(video);
+    const objectFit = style.objectFit || "contain";
+    const videoAspect = sourceWidth / sourceHeight;
+    const boxAspect = videoRect.width / videoRect.height;
+    let cssWidth = videoRect.width;
+    let cssHeight = videoRect.height;
+    if (objectFit === "contain" || objectFit === "scale-down" || objectFit === "none") {
+      if (boxAspect > videoAspect) {
+        cssHeight = videoRect.height;
+        cssWidth = cssHeight * videoAspect;
+      } else {
+        cssWidth = videoRect.width;
+        cssHeight = cssWidth / videoAspect;
+      }
+    } else if (objectFit === "cover") {
+      if (boxAspect > videoAspect) {
+        cssWidth = videoRect.width;
+        cssHeight = cssWidth / videoAspect;
+      } else {
+        cssHeight = videoRect.height;
+        cssWidth = cssHeight * videoAspect;
+      }
+    }
+    const cssLeft = baseLeft + (videoRect.width - cssWidth) / 2;
+    const cssTop = baseTop + (videoRect.height - cssHeight) / 2;
+    return {
+      cssLeft,
+      cssTop,
+      cssWidth,
+      cssHeight,
+      pixelWidth: Math.max(1, Math.round(cssWidth * dpr)),
+      pixelHeight: Math.max(1, Math.round(cssHeight * dpr)),
+      dpr
+    };
+  }
   var SettingsManager = class {
     constructor() {
       this._settings = this._defaults();
@@ -532,8 +457,11 @@
       this._video = null;
       this._player = null;
       this._resizeObserver = null;
+      this._videoResizeObserver = null;
       this._fsHandler = null;
+      this._theaterHandler = null;
       this._theaterObserver = null;
+      this._metadataHandler = null;
     }
     create(video) {
       this._video = video;
@@ -544,15 +472,18 @@
         position: "absolute",
         top: "0",
         left: "0",
-        width: "100%",
-        height: "100%",
+        width: "0",
+        height: "0",
         pointerEvents: "none",
         zIndex: "50",
         imageRendering: "auto"
       });
+      if (getComputedStyle(this._player).position === "static") {
+        this._player.style.position = "relative";
+      }
       this._player.appendChild(canvas);
       this._canvas = canvas;
-      this._updateCanvasSize();
+      this._syncToVideoRect();
       this._startResizeObserver();
       this._handleFullscreen();
       this._handleTheaterMode();
@@ -563,6 +494,10 @@
         this._resizeObserver.disconnect();
         this._resizeObserver = null;
       }
+      if (this._videoResizeObserver) {
+        this._videoResizeObserver.disconnect();
+        this._videoResizeObserver = null;
+      }
       if (this._theaterObserver) {
         this._theaterObserver.disconnect();
         this._theaterObserver = null;
@@ -570,6 +505,14 @@
       if (this._fsHandler) {
         document.removeEventListener("fullscreenchange", this._fsHandler);
         this._fsHandler = null;
+      }
+      if (this._theaterHandler) {
+        document.removeEventListener("yt-set-theater-mode-enabled", this._theaterHandler);
+        this._theaterHandler = null;
+      }
+      if (this._metadataHandler && this._video) {
+        this._video.removeEventListener("loadedmetadata", this._metadataHandler);
+        this._metadataHandler = null;
       }
       if (this._canvas) {
         this._canvas.remove();
@@ -586,40 +529,41 @@
         this._canvas.style.display = visible ? "block" : "none";
       }
     }
-    _updateCanvasSize() {
+    _syncToVideoRect() {
       const canvas = this._canvas;
+      const video = this._video;
       const container = this._player;
-      if (!canvas || !container) return;
-      const dpr = devicePixelRatio || 1;
-      const inFS = !!document.fullscreenElement;
-      const w = inFS ? window.innerWidth : container.clientWidth;
-      const h = inFS ? window.innerHeight : container.clientHeight;
-      if (w === 0 || h === 0) return;
-      const pw = Math.round(w * dpr);
-      const ph = Math.round(h * dpr);
-      if (canvas.width !== pw || canvas.height !== ph) {
-        canvas.width = pw;
-        canvas.height = ph;
-      }
+      if (!canvas || !video || !container) return;
+      const rect = getDisplayedVideoRect(video, container);
+      if (!rect) return;
+      canvas.style.left = `${rect.cssLeft}px`;
+      canvas.style.top = `${rect.cssTop}px`;
+      canvas.style.width = `${rect.cssWidth}px`;
+      canvas.style.height = `${rect.cssHeight}px`;
+      if (canvas.width !== rect.pixelWidth) canvas.width = rect.pixelWidth;
+      if (canvas.height !== rect.pixelHeight) canvas.height = rect.pixelHeight;
     }
     _startResizeObserver() {
-      this._resizeObserver = new ResizeObserver(() => this._updateCanvasSize());
+      this._resizeObserver = new ResizeObserver(() => this._syncToVideoRect());
       this._resizeObserver.observe(this._player);
+      this._videoResizeObserver = new ResizeObserver(() => this._syncToVideoRect());
+      this._videoResizeObserver.observe(this._video);
+      this._metadataHandler = () => this._syncToVideoRect();
+      this._video.addEventListener("loadedmetadata", this._metadataHandler);
     }
     _handleFullscreen() {
-      this._fsHandler = () => requestAnimationFrame(
-        () => requestAnimationFrame(() => this._updateCanvasSize())
-      );
+      this._fsHandler = () => this._syncToVideoRect();
       document.addEventListener("fullscreenchange", this._fsHandler);
     }
     _handleTheaterMode() {
-      document.addEventListener("yt-set-theater-mode-enabled", () => {
-        setTimeout(() => this._updateCanvasSize(), 50);
-      });
+      this._theaterHandler = () => {
+        setTimeout(() => this._syncToVideoRect(), 50);
+      };
+      document.addEventListener("yt-set-theater-mode-enabled", this._theaterHandler);
       const app = document.querySelector("ytd-app");
       if (app) {
         this._theaterObserver = new MutationObserver(() => {
-          setTimeout(() => this._updateCanvasSize(), 50);
+          setTimeout(() => this._syncToVideoRect(), 50);
         });
         this._theaterObserver.observe(app, { attributes: true, attributeFilter: ["theater"] });
       }
@@ -628,7 +572,6 @@
   var FrameProcessor = class {
     constructor() {
       this._running = false;
-      this._gen = 0;
       this._video = null;
       this._pipeline = null;
       this._aiUpscaler = null;
@@ -643,23 +586,13 @@
       this._aiUpscaler = aiUpscaler;
       this._perfMonitor = perfMonitor;
       this._running = true;
-      this._gen++;
-      const myGen = this._gen;
       this._useRVFC = typeof video.requestVideoFrameCallback === "function";
       if (this._useRVFC) {
-        const loop = () => {
-          if (!this._running || this._gen !== myGen) return;
-          this._processOneFrame();
-          this._video.requestVideoFrameCallback(loop);
-        };
-        video.requestVideoFrameCallback(loop);
+        this._rVFCLoop = this._rVFCLoop.bind(this);
+        video.requestVideoFrameCallback(this._rVFCLoop);
       } else {
-        const loop = () => {
-          if (!this._running || this._gen !== myGen) return;
-          this._processOneFrame();
-          this._rafId = requestAnimationFrame(loop);
-        };
-        this._rafId = requestAnimationFrame(loop);
+        this._rAFLoop = this._rAFLoop.bind(this);
+        this._rafId = requestAnimationFrame(this._rAFLoop);
       }
     }
     stop() {
@@ -668,6 +601,16 @@
         cancelAnimationFrame(this._rafId);
         this._rafId = null;
       }
+    }
+    _rVFCLoop() {
+      if (!this._running) return;
+      this._processOneFrame();
+      this._video.requestVideoFrameCallback(this._rVFCLoop);
+    }
+    _rAFLoop() {
+      if (!this._running) return;
+      this._processOneFrame();
+      this._rafId = requestAnimationFrame(this._rAFLoop);
     }
     _processOneFrame() {
       const video = this._video;
@@ -741,10 +684,14 @@
     start(player) {
       this._player = player;
       document.addEventListener("visibilitychange", this._boundUpdate);
+      window.addEventListener("blur", this._boundUpdate);
+      window.addEventListener("focus", this._boundUpdate);
       this._update();
     }
     stop() {
       document.removeEventListener("visibilitychange", this._boundUpdate);
+      window.removeEventListener("blur", this._boundUpdate);
+      window.removeEventListener("focus", this._boundUpdate);
       this._restore();
       this._player = null;
     }
@@ -756,7 +703,7 @@
         this._restore();
         return;
       }
-      if (document.hidden) this._lower();
+      if (document.hidden || !document.hasFocus()) this._lower();
       else this._restore();
     }
     _lower() {
@@ -790,134 +737,24 @@
     480: { 30: 1.5, 60: 2.5 },
     360: { 30: 0.8, 60: 1.2 }
   };
-  var _WH_PER_GB_FIXED = 2.5;
-  var _WH_PER_GB_4G = 7;
-  var _WH_PER_GB_3G = 18;
-  var _WH_PER_GB_2G = 40;
-  var _MAX_DECODE_W = 5;
+  var _WH_PER_GB_WIFI = 4.5;
+  var _MAX_DECODE_W = 6;
   var _PX_4K = 3840 * 2160;
-  function _whPerGb(connType, effectiveType) {
-    if (connType === "wifi" || connType === "ethernet") return _WH_PER_GB_FIXED;
-    if (connType === "cellular") {
-      if (effectiveType === "4g") return _WH_PER_GB_4G;
-      if (effectiveType === "3g") return _WH_PER_GB_3G;
-      return _WH_PER_GB_2G;
-    }
-    if (effectiveType === "4g") return (_WH_PER_GB_FIXED + _WH_PER_GB_4G) / 2;
-    if (effectiveType === "3g") return _WH_PER_GB_3G;
-    return _WH_PER_GB_2G;
+  function _networkMultiplier(rtt, effectiveType) {
+    let m;
+    if (rtt <= 15) m = 0.9;
+    else if (rtt <= 60) m = 0.9 + (rtt - 15) / 45 * 0.1;
+    else if (rtt <= 150) m = 1 + (rtt - 60) / 90 * 1.2;
+    else if (rtt <= 400) m = 2.2 + (rtt - 150) / 250 * 1.3;
+    else m = 3.5 + Math.min(1, (rtt - 400) / 300) * 1.5;
+    if (effectiveType === "slow-2g" || effectiveType === "2g") m = Math.max(m, 3.5);
+    else if (effectiveType === "3g") m = Math.max(m, 2);
+    return m;
   }
   function _ytBitrate(height, fps) {
     const heights = [2160, 1440, 1080, 720, 480, 360];
     const h = heights.find((t) => height >= t) ?? 360;
     return _YT_BITRATE[h]?.[fps > 35 ? 60 : 30] ?? 5;
-  }
-  var _CO2_BY_ZONE = {
-    "America/New_York": 380,
-    "America/Chicago": 420,
-    "America/Denver": 350,
-    "America/Los_Angeles": 210,
-    "America/Phoenix": 400,
-    "America/Toronto": 130,
-    "America/Vancouver": 25,
-    "America/Sao_Paulo": 100,
-    "America/Mexico_City": 450,
-    "America/Lima": 290,
-    "America/Bogota": 200,
-    "America/Santiago": 240,
-    "America/Buenos_Aires": 380,
-    "Europe/London": 180,
-    "Europe/Paris": 70,
-    "Europe/Berlin": 360,
-    "Europe/Amsterdam": 290,
-    "Europe/Madrid": 160,
-    "Europe/Rome": 230,
-    "Europe/Warsaw": 650,
-    "Europe/Stockholm": 40,
-    "Europe/Oslo": 30,
-    "Europe/Zurich": 90,
-    "Europe/Helsinki": 90,
-    "Europe/Vienna": 180,
-    "Europe/Brussels": 150,
-    "Europe/Copenhagen": 160,
-    "Europe/Dublin": 280,
-    "Europe/Lisbon": 170,
-    "Europe/Prague": 430,
-    "Europe/Budapest": 250,
-    "Europe/Bucharest": 290,
-    "Europe/Athens": 320,
-    "Europe/Istanbul": 420,
-    "Asia/Tokyo": 460,
-    "Asia/Shanghai": 580,
-    "Asia/Seoul": 400,
-    "Asia/Kolkata": 640,
-    "Asia/Singapore": 380,
-    "Asia/Dubai": 400,
-    "Asia/Hong_Kong": 580,
-    "Asia/Taipei": 480,
-    "Asia/Bangkok": 520,
-    "Asia/Jakarta": 700,
-    "Asia/Karachi": 380,
-    "Asia/Dhaka": 540,
-    "Australia/Sydney": 620,
-    "Australia/Melbourne": 620,
-    "Australia/Brisbane": 690,
-    "Australia/Perth": 620,
-    "Australia/Adelaide": 480,
-    "Pacific/Auckland": 130,
-    "Pacific/Honolulu": 700,
-    "Africa/Johannesburg": 700,
-    "Africa/Cairo": 460,
-    "Africa/Lagos": 480,
-    "Africa/Nairobi": 200
-  };
-  var _CO2_REGIONAL_AVG = {
-    America: 350,
-    Europe: 250,
-    Asia: 500,
-    Africa: 580,
-    Australia: 620,
-    Pacific: 400,
-    Indian: 450,
-    Atlantic: 350
-  };
-  var _CO2_GLOBAL_AVG = 450;
-  function _getCarbonIntensity() {
-    try {
-      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const exact = _CO2_BY_ZONE[tz];
-      if (exact !== void 0) return exact;
-      return _CO2_REGIONAL_AVG[tz.split("/")[0]] ?? _CO2_GLOBAL_AVG;
-    } catch {
-      return _CO2_GLOBAL_AVG;
-    }
-  }
-  var _YT_QUALITY_HEIGHT = {
-    highres: 4320,
-    hd2160: 2160,
-    hd1440: 1440,
-    hd1080: 1080,
-    hd720: 720,
-    large: 480,
-    medium: 360,
-    small: 240,
-    tiny: 144
-  };
-  function _getMaxAvailableHeight() {
-    try {
-      const player = document.querySelector("#movie_player");
-      const levels = player?.getAvailableQualityLevels?.();
-      if (Array.isArray(levels) && levels.length > 0) {
-        let max = 0;
-        for (const l of levels) {
-          const h = _YT_QUALITY_HEIGHT[l];
-          if (h && h > max) max = h;
-        }
-        if (max > 0) return Math.min(max, 2160);
-      }
-    } catch {
-    }
-    return 2160;
   }
   var EnergyTracker = class {
     constructor() {
@@ -930,10 +767,6 @@
       this._onUpdate = null;
       this._lastFrames = null;
       this._lastFrameMs = null;
-      this._lastDecodedBytes = null;
-      this._lastDecodedBytesMs = null;
-      this._carbonIntensity = _getCarbonIntensity();
-      this._referenceHeight = 2160;
     }
     async load() {
       return new Promise((resolve) => {
@@ -972,28 +805,15 @@
       this._onUpdate = null;
       this._lastFrames = null;
       this._lastFrameMs = null;
-      this._lastDecodedBytes = null;
-      this._lastDecodedBytesMs = null;
-      this._referenceHeight = 2160;
     }
-    // Returns a display string: rate line + lifetime line (newline-separated).
+    // Returns a two-line display string: current rate + lifetime total.
     formatDisplay() {
       const total = this._totalWh;
       const rate = this._currentRate;
-      const ci = this._carbonIntensity;
-      const refLabel = this._referenceHeight >= 2160 ? "4K" : `${this._referenceHeight}p`;
-      const co2RateG = rate * ci / 1e3;
-      const co2TotalG = total * ci / 1e3;
-      const rateStr = rate >= 0.1 ? `~${rate.toFixed(1)} Wh/hr \xB7 ~${co2RateG.toFixed(0)}g CO\u2082/hr vs ${refLabel}` : null;
-      let totalStr = null;
-      if (total >= 0.05) {
-        const whStr = total < 1e3 ? `${total.toFixed(1)} Wh` : `${(total / 1e3).toFixed(2)} kWh`;
-        const co2Str = co2TotalG < 1e3 ? `${co2TotalG.toFixed(0)}g CO\u2082` : `${(co2TotalG / 1e3).toFixed(2)}kg CO\u2082`;
-        totalStr = `${whStr} \xB7 ${co2Str} saved`;
-      }
-      if (!rateStr && !totalStr) return "";
-      if (rateStr && totalStr) return `\u2193 ${rateStr}
-${totalStr} lifetime`;
+      const totalStr = total < 0.05 ? null : total < 1e3 ? `${total.toFixed(1)} Wh saved` : `${(total / 1e3).toFixed(3)} kWh saved`;
+      const rateStr = rate >= 0.1 ? `${rate.toFixed(1)} Wh/hr vs 4K` : null;
+      if (!totalStr && !rateStr) return "";
+      if (rateStr && totalStr) return `\u2193 ${rateStr} \xB7 ${totalStr} lifetime`;
       return totalStr ?? rateStr;
     }
     _tick() {
@@ -1007,40 +827,22 @@ ${totalStr} lifetime`;
       this._startMs = now;
       if (!this._video || this._video.paused || this._video.ended) return;
       const conn = navigator.connection;
-      const connType = conn?.type ?? "unknown";
+      const rtt = conn?.rtt ?? 50;
       const effectiveType = conn?.effectiveType ?? "4g";
       const height = this._video.videoHeight || 1080;
       const fps = this._measureFPS();
-      const measuredMbps = this._measureActualBitrateMbps();
-      const streamMbps = measuredMbps !== null ? measuredMbps : _ytBitrate(height, fps);
-      const maxHeight = _getMaxAvailableHeight();
-      this._referenceHeight = maxHeight;
-      const ceilingMbps = _ytBitrate(maxHeight, fps);
-      const deltaMbps = Math.max(0, ceilingMbps - streamMbps);
+      const streamMbps = _ytBitrate(height, fps);
+      const fourKMbps = _ytBitrate(2160, fps);
+      const deltaMbps = Math.max(0, fourKMbps - streamMbps);
       const gbSaved = deltaMbps * 0.45 * hrs;
-      const networkWh = gbSaved * _whPerGb(connType, effectiveType);
-      const srcPx = (this._video.videoWidth || Math.round(height * 16 / 9)) * (this._video.videoHeight || height);
+      const netMult = _networkMultiplier(rtt, effectiveType);
+      const networkWh = gbSaved * _WH_PER_GB_WIFI * netMult;
+      const srcPx = height * 16 / 9 * height;
       const deviceWh = _MAX_DECODE_W * Math.max(0, 1 - srcPx / _PX_4K) * hrs;
       const wh = networkWh + deviceWh;
       this._currentRate = hrs > 0 ? wh / hrs : 0;
       this._sessionWh += wh;
       this._totalWh += wh;
-    }
-    // Measures actual compressed stream bitrate from bytes decoded since last tick.
-    // Returns Mbps, or null if the property is unavailable (non-Chrome, or first tick).
-    _measureActualBitrateMbps() {
-      const bytes = this._video.webkitVideoDecodedByteCount;
-      if (typeof bytes !== "number") return null;
-      const now = performance.now();
-      let mbps = null;
-      if (this._lastDecodedBytes !== null && bytes >= this._lastDecodedBytes) {
-        const db = bytes - this._lastDecodedBytes;
-        const dt = (now - this._lastDecodedBytesMs) / 1e3;
-        if (dt >= 2 && db >= 0) mbps = db * 8 / dt / 1e6;
-      }
-      this._lastDecodedBytes = bytes;
-      this._lastDecodedBytesMs = now;
-      return mbps;
     }
     _measureFPS() {
       const video = this._video;
@@ -1065,194 +867,205 @@ ${totalStr} lifetime`;
       }
     }
   };
-  var UIManager = class {
+  var PlayerToggleManager = class {
     constructor() {
-      this._host = null;
-      this._shadow = null;
+      this._anchor = null;
+      this._button = null;
+      this._observer = null;
       this._callbacks = {};
+      this._enabled = false;
+      this._status = "off";
+      this._resolutionLabel = "";
+      this._leafUrl = "";
+      this._retryTimer = null;
+      this._lastInsertTarget = null;
+      this._fallbackHost = null;
+      this._boundClick = this._handleClick.bind(this);
+      this._boundEnsureInserted = this._ensureInserted.bind(this);
     }
     inject(anchorElement, settings, callbacks) {
+      this._anchor = anchorElement;
       this._callbacks = callbacks;
-      const host = document.createElement("div");
-      host.id = "eco-upscaler-ui";
-      Object.assign(host.style, {
-        position: "absolute",
-        top: "0",
-        left: "0",
-        right: "0",
-        bottom: "0",
-        pointerEvents: "none",
-        zIndex: "2147483641"
-      });
-      anchorElement.style.position = anchorElement.style.position || "relative";
-      anchorElement.appendChild(host);
-      this._host = host;
-      const shadow = host.attachShadow({ mode: "closed" });
-      this._shadow = shadow;
-      shadow.innerHTML = `
-      <style>
-        :host {
-          all: initial;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        }
-        #panel {
-          position: absolute;
-          top: 12px;
-          right: 12px;
-          pointer-events: auto;
-          background: rgba(0, 0, 0, 0.82);
-          color: #fff;
-          border-radius: 10px;
-          padding: 10px 14px;
-          min-width: 168px;
-          font-size: 12px;
-          line-height: 1.5;
-          box-shadow: 0 4px 16px rgba(0,0,0,0.5);
-          z-index: 2147483641;
-          user-select: none;
-        }
-        #panel.hidden { display: none; }
-        .row {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 10px;
-          margin-bottom: 6px;
-        }
-        .row:last-child { margin-bottom: 0; }
-        label { color: #ccc; white-space: nowrap; }
-        .switch {
-          position: relative;
-          width: 34px;
-          height: 18px;
-          flex-shrink: 0;
-        }
-        .switch input { opacity: 0; width: 0; height: 0; }
-        .slider {
-          position: absolute;
-          inset: 0;
-          background: #555;
-          border-radius: 18px;
-          cursor: pointer;
-          transition: background 0.2s;
-        }
-        .slider:before {
-          content: '';
-          position: absolute;
-          width: 12px;
-          height: 12px;
-          left: 3px;
-          top: 3px;
-          background: #fff;
-          border-radius: 50%;
-          transition: transform 0.2s;
-        }
-        input:checked + .slider { background: #4ade80; }
-        input:checked + .slider:before { transform: translateX(16px); }
-        #status-badge {
-          font-size: 10px;
-          font-weight: 600;
-          padding: 2px 7px;
-          border-radius: 20px;
-          background: #444;
-          color: #aaa;
-          letter-spacing: 0.5px;
-          text-transform: uppercase;
-        }
-        #status-badge.active { background: #14532d; color: #4ade80; }
-        #status-badge.degraded { background: #7c2d12; color: #fb923c; }
-        #status-badge.disabled { background: #450a0a; color: #f87171; }
-        #res { color: #666; font-size: 10px; text-align: right; }
-        #ai-badge {
-          font-size: 10px;
-          font-weight: 600;
-          padding: 2px 7px;
-          border-radius: 20px;
-          background: #444;
-          color: #aaa;
-          letter-spacing: 0.5px;
-          text-transform: uppercase;
-        }
-        #ai-badge.on  { background: #14532d; color: #4ade80; }
-        #ai-badge.off { background: #450a0a; color: #f87171; }
-        #energy {
-          color: #4ade80;
-          font-size: 10px;
-          text-align: right;
-          opacity: 0.75;
-          margin-top: 4px;
-          line-height: 1.4;
-          white-space: pre-line;
-        }
-      </style>
-      <div id="panel">
-        <div class="row">
-          <label>Eco Upscale</label>
-          <label class="switch">
-            <input type="checkbox" id="toggle" ${settings.enabled ? "checked" : ""}>
-            <span class="slider"></span>
-          </label>
-        </div>
-        <div class="row">
-          <label>Status</label>
-          <span id="status-badge">Off</span>
-        </div>
-        <div class="row">
-          <label>AI</label>
-          <span id="ai-badge">\u2014</span>
-        </div>
-        <div id="res"></div>
-        <div id="energy"></div>
-      </div>
-    `;
-      shadow.getElementById("toggle").addEventListener("change", (e) => {
-        if (this._callbacks.onToggle) this._callbacks.onToggle(e.target.checked);
-      });
-      this.updateStatus(settings.enabled ? "active" : "off");
+      this._enabled = !!settings.enabled;
+      this._status = this._enabled ? "active" : "off";
+      this._leafUrl = chrome.runtime.getURL("icons/disabled_leaf_icon.png");
+      this._button = this._createButton();
+      this._button.addEventListener("click", this._boundClick);
+      this._applyState();
+      this._ensureInserted();
+      this._startObserver();
+      this._startRetryTimer();
     }
     remove() {
-      if (this._host) {
-        this._host.remove();
-        this._host = null;
-        this._shadow = null;
+      if (this._observer) {
+        this._observer.disconnect();
+        this._observer = null;
       }
+      if (this._retryTimer) {
+        clearInterval(this._retryTimer);
+        this._retryTimer = null;
+      }
+      if (this._button) {
+        this._button.removeEventListener("click", this._boundClick);
+        this._button.remove();
+        this._button = null;
+      }
+      if (this._fallbackHost) {
+        this._fallbackHost.remove();
+        this._fallbackHost = null;
+      }
+      this._anchor = null;
+      this._lastInsertTarget = null;
+      this._callbacks = {};
     }
     updateStatus(status) {
-      if (!this._shadow) return;
-      const badge = this._shadow.getElementById("status-badge");
-      if (!badge) return;
-      const labels = { active: "Active", degraded: "Degraded", fallback: "Fallback", disabled: "Disabled", off: "Off" };
-      badge.textContent = labels[status] ?? status;
-      badge.className = status;
+      this._status = status || (this._enabled ? "active" : "off");
+      this._applyState();
     }
     updateToggle(enabled) {
-      if (!this._shadow) return;
-      const toggle = this._shadow.getElementById("toggle");
-      if (toggle) toggle.checked = enabled;
+      this._enabled = !!enabled;
+      this._status = this._enabled ? "active" : "off";
+      this._applyState();
+      this._ensureInserted();
     }
-    updateEnergy(text) {
-      if (!this._shadow) return;
-      const el = this._shadow.getElementById("energy");
-      if (el) el.textContent = text || "";
-    }
-    updateAIStatus(ready) {
-      if (!this._shadow) return;
-      const badge = this._shadow.getElementById("ai-badge");
-      if (!badge) return;
-      badge.textContent = ready ? "Active" : "Off";
-      badge.className = ready ? "on" : "off";
+    updateEnergy() {
+      this._applyState();
     }
     updateResolution(width, height, rendererSuffix = "") {
-      if (!this._shadow) return;
-      const el = this._shadow.getElementById("res");
-      if (!el) return;
       let label = "";
       if (height >= 2160) label = "4K";
       else if (height >= 1440) label = "1440p";
       else if (height >= 1080) label = "1080p";
       else if (height >= 720) label = "720p";
       else if (height > 0) label = `${height}p`;
-      el.textContent = label ? `Source: ${label}${rendererSuffix}` : "";
+      this._resolutionLabel = label ? `Source: ${label}${rendererSuffix}` : "";
+      this._applyState();
+    }
+    _createButton() {
+      const button = document.createElement("button");
+      button.className = "ytp-button eco-upscaler-control";
+      button.type = "button";
+      button.setAttribute("aria-label", "Eco Upscale");
+      button.innerHTML = `
+      <span class="eco-toggle-track" aria-hidden="true">
+        <span class="eco-toggle-thumb">
+          <span class="eco-toggle-leaf"></span>
+        </span>
+      </span>
+    `;
+      button.style.setProperty("--eco-leaf-url", `url("${this._leafUrl}")`);
+      return button;
+    }
+    _handleClick(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      const nextEnabled = !this._enabled;
+      this.updateToggle(nextEnabled);
+      if (this._callbacks.onToggle) this._callbacks.onToggle(nextEnabled);
+    }
+    _startObserver() {
+      if (!this._anchor || this._observer) return;
+      this._observer = new MutationObserver(this._boundEnsureInserted);
+      this._observer.observe(document.body, { childList: true, subtree: true });
+    }
+    _startRetryTimer() {
+      if (this._retryTimer) return;
+      let attempts = 0;
+      this._retryTimer = setInterval(() => {
+        attempts++;
+        this._ensureInserted();
+        if (this._button?.isConnected && this._button.getBoundingClientRect().width > 0) {
+          clearInterval(this._retryTimer);
+          this._retryTimer = null;
+        } else if (attempts >= 40) {
+          console.warn("[EcoUpscaler] Player toggle was not visibly mounted.", this.debugSnapshot());
+          clearInterval(this._retryTimer);
+          this._retryTimer = null;
+        }
+      }, 250);
+    }
+    _ensureInserted() {
+      if (!this._anchor || !this._button) return;
+      const target = this._findInsertionTarget();
+      if (!target) return;
+      const { container, before } = target;
+      if (this._button.parentElement === container) return;
+      const existing = container.querySelector(".eco-upscaler-control");
+      if (existing && existing !== this._button) existing.remove();
+      const insertionPoint = before?.parentElement === container ? before : null;
+      container.insertBefore(this._button, insertionPoint);
+      if (this._lastInsertTarget !== container) {
+        this._lastInsertTarget = container;
+        console.info("[EcoUpscaler] Inserted player toggle.", container);
+      }
+    }
+    _findInsertionTarget() {
+      const player = this._anchor?.id === "movie_player" ? this._anchor : document.querySelector("#movie_player") || this._anchor;
+      if (!player) return null;
+      const rightControls = player.querySelector(".ytp-right-controls");
+      if (rightControls) {
+        return {
+          container: rightControls,
+          before: this._findDirectChild(rightControls, ".ytp-subtitles-button") || this._findDirectChild(rightControls, ".ytp-settings-button") || this._findDirectChild(rightControls, ".ytp-miniplayer-button")
+        };
+      }
+      const chromeControls = player.querySelector(".ytp-chrome-controls");
+      if (chromeControls) {
+        return {
+          container: chromeControls,
+          before: this._findDirectChild(chromeControls, ".ytp-subtitles-button") || this._findDirectChild(chromeControls, ".ytp-settings-button") || this._findDirectChild(chromeControls, ".ytp-miniplayer-button") || this._findDirectChild(chromeControls, ".ytp-fullscreen-button")
+        };
+      }
+      const chromeBottom = player.querySelector(".ytp-chrome-bottom") || player;
+      return {
+        container: this._ensureFallbackHost(chromeBottom),
+        before: null
+      };
+    }
+    _ensureFallbackHost(parent) {
+      if (this._fallbackHost?.isConnected) return this._fallbackHost;
+      const host = document.createElement("div");
+      host.className = "eco-upscaler-control-host";
+      parent.appendChild(host);
+      this._fallbackHost = host;
+      return host;
+    }
+    _findDirectChild(container, selector) {
+      const match = container.querySelector(selector);
+      if (!match) return null;
+      if (match.parentElement === container) return match;
+      return Array.from(container.children).find((child) => child.contains(match)) || null;
+    }
+    _isMountedInPlayer() {
+      return !!this._button?.isConnected;
+    }
+    debugSnapshot() {
+      const player = this._anchor || document.querySelector("#movie_player");
+      return {
+        hasPlayer: !!player,
+        hasRightControls: !!player?.querySelector(".ytp-right-controls"),
+        hasChromeControls: !!player?.querySelector(".ytp-chrome-controls"),
+        hasChromeBottom: !!player?.querySelector(".ytp-chrome-bottom"),
+        buttonConnected: this._isMountedInPlayer(),
+        parentClass: this._button?.parentElement?.className || null
+      };
+    }
+    _applyState() {
+      if (!this._button) return;
+      this._button.classList.toggle("eco-active", this._enabled);
+      this._button.classList.toggle("eco-degraded", this._status === "degraded");
+      this._button.classList.toggle("eco-disabled", this._status === "disabled");
+      this._button.setAttribute("aria-pressed", String(this._enabled));
+      const statusLabel = {
+        active: "On",
+        degraded: "Degraded",
+        disabled: "Disabled",
+        off: "Off"
+      }[this._status] || (this._enabled ? "On" : "Off");
+      const suffix = this._resolutionLabel ? ` - ${this._resolutionLabel}` : "";
+      const title = `Eco Upscale: ${statusLabel}${suffix}`;
+      this._button.title = title;
+      this._button.setAttribute("aria-label", title);
     }
   };
   var _settingsManager = null;
@@ -1267,13 +1080,26 @@ ${totalStr} lifetime`;
   var _uiManager = null;
   var _initialized = false;
   var _currentPath = "";
+  function ensurePlayerToggle(settings) {
+    if (_uiManager) {
+      _uiManager.updateToggle(!!_settingsManager.get().enabled);
+      return;
+    }
+    _uiManager = new PlayerToggleManager();
+    _uiManager.inject(document.body, settings, {
+      onToggle: (enabled) => {
+        _settingsManager.save({ enabled, status: enabled ? "active" : "off" });
+      }
+    });
+  }
   async function init() {
+    const settings = _settingsManager.get();
+    ensurePlayerToggle(settings);
     if (_initialized) return;
     try {
       chrome.storage.local.set({ onWatchPage: true });
     } catch {
     }
-    const settings = _settingsManager.get();
     _videoDetector = new VideoDetector();
     _videoDetector.onVideoFound = (video) => _onVideoReady(video, settings);
     _videoDetector.onVideoReplaced = () => {
@@ -1285,19 +1111,40 @@ ${totalStr} lifetime`;
   async function _onVideoReady(video, settings) {
     if (_initialized) return;
     _initialized = true;
+    const playerContainer = document.querySelector("#movie_player") || video.parentElement;
+    const handleToggle = (enabled) => {
+      _settingsManager.save({ enabled, status: enabled ? "active" : "off" });
+      _overlayManager && _overlayManager.setVisible(enabled);
+      if (enabled) {
+        _perfMonitor && _perfMonitor.reset();
+        if (_frameProcessor && _upscalerPipeline && _perfMonitor) {
+          _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
+        }
+        _energyTracker && _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
+      } else {
+        _frameProcessor && _frameProcessor.stop();
+        _energyTracker && _energyTracker.end();
+        _uiManager && _uiManager.updateEnergy(_energyTracker ? _energyTracker.formatDisplay() : "");
+      }
+      _backgroundQualityManager && _backgroundQualityManager.refresh();
+      _uiManager && _uiManager.updateStatus(enabled ? "active" : "off");
+    };
+    if (playerContainer) {
+      _backgroundQualityManager = new BackgroundQualityManager(_settingsManager);
+      _backgroundQualityManager.start(playerContainer);
+      if (_uiManager) {
+        _uiManager.remove();
+      }
+      _uiManager = new PlayerToggleManager();
+      _uiManager.inject(playerContainer, _settingsManager.get(), { onToggle: handleToggle });
+    }
     _overlayManager = new OverlayManager();
     const canvas = _overlayManager.create(video);
+    _overlayManager.setVisible(settings.enabled);
     _upscalerPipeline = new UpscalerPipeline(canvas, video, settings);
     await _upscalerPipeline.init();
     _energyTracker = new EnergyTracker();
     await _energyTracker.load();
-    const playerContainer = document.querySelector("#movie_player") || video.parentElement;
-    let aiReady = false;
-    if (playerContainer) {
-      _aiUpscaler = new AITileUpscaler(playerContainer, video);
-      aiReady = await _aiUpscaler.init();
-    }
-    _overlayManager.setVisible(settings.enabled);
     _perfMonitor = new PerformanceMonitor();
     _perfMonitor.onDegrade(() => {
       _uiManager && _uiManager.updateStatus("degraded");
@@ -1306,8 +1153,8 @@ ${totalStr} lifetime`;
       _settingsManager.save({ enabled: false, status: "disabled" });
       _frameProcessor && _frameProcessor.stop();
       _overlayManager && _overlayManager.setVisible(false);
-      _uiManager && _uiManager.updateStatus("disabled");
       _uiManager && _uiManager.updateToggle(false);
+      _uiManager && _uiManager.updateStatus("disabled");
     });
     _perfMonitor.onRecover(() => {
       _uiManager && _uiManager.updateStatus("active");
@@ -1317,34 +1164,9 @@ ${totalStr} lifetime`;
       _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
       _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
     }
-    if (playerContainer) {
-      _backgroundQualityManager = new BackgroundQualityManager(_settingsManager);
-      _backgroundQualityManager.start(playerContainer);
-      _uiManager = new UIManager();
-      _uiManager.inject(playerContainer, settings, {
-        onToggle: (enabled) => {
-          _settingsManager.save({ enabled, status: enabled ? "active" : "off" });
-          _overlayManager.setVisible(enabled);
-          _aiUpscaler && _aiUpscaler.setVisible(enabled);
-          if (enabled) {
-            _perfMonitor.reset();
-            _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
-            if (video.readyState >= 2) _upscalerPipeline.processFrame();
-            _energyTracker && _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
-          } else {
-            _frameProcessor.stop();
-            _energyTracker && _energyTracker.end();
-            _uiManager.updateEnergy(_energyTracker ? _energyTracker.formatDisplay() : "");
-          }
-          _backgroundQualityManager && _backgroundQualityManager.refresh();
-          _uiManager.updateStatus(enabled ? "active" : "off");
-        }
-      });
-    }
     if (_uiManager && _energyTracker) {
       _uiManager.updateEnergy(_energyTracker.formatDisplay());
     }
-    if (_uiManager) _uiManager.updateAIStatus(aiReady);
     const rendererLabel = _upscalerPipeline.getRendererType() === "webgl" ? " \xB7 GL" : "";
     const showRes = () => {
       if (_uiManager) _uiManager.updateResolution(video.videoWidth, video.videoHeight, rendererLabel);
@@ -1360,19 +1182,19 @@ ${totalStr} lifetime`;
       if (!_initialized) return;
       if ("enabled" in changed) {
         _overlayManager.setVisible(all.enabled);
-        _aiUpscaler && _aiUpscaler.setVisible(all.enabled);
         _uiManager && _uiManager.updateToggle(all.enabled);
         if (all.enabled) {
           _perfMonitor.reset();
           _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
-          if (video.readyState >= 2) _upscalerPipeline.processFrame();
           _energyTracker && _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
         } else {
           _frameProcessor.stop();
           _energyTracker && _energyTracker.end();
           _uiManager && _uiManager.updateEnergy(_energyTracker ? _energyTracker.formatDisplay() : "");
         }
-        _uiManager && _uiManager.updateStatus(all.enabled ? "active" : "off");
+        _uiManager && _uiManager.updateStatus(all.status || (all.enabled ? "active" : "off"));
+      } else if ("status" in changed) {
+        _uiManager && _uiManager.updateStatus(all.status);
       }
     });
   }
