@@ -1,4 +1,5 @@
 import { UpscalerPipeline } from './upscaler.js';
+import { AITileUpscaler } from './ai-upscaler.js';
 
 // YouTube Eco Upscaler — content script orchestrator.
 
@@ -362,6 +363,7 @@ class OverlayManager {
 class FrameProcessor {
   constructor() {
     this._running = false;
+    this._gen     = 0;
     this._video = null;
     this._pipeline = null;
     this._aiUpscaler = null;
@@ -377,14 +379,25 @@ class FrameProcessor {
     this._aiUpscaler = aiUpscaler;
     this._perfMonitor = perfMonitor;
     this._running = true;
+    this._gen++;                   // invalidate any callbacks queued by previous loops
+    const myGen = this._gen;
+
     this._useRVFC = typeof video.requestVideoFrameCallback === 'function';
 
     if (this._useRVFC) {
-      this._rVFCLoop = this._rVFCLoop.bind(this);
-      video.requestVideoFrameCallback(this._rVFCLoop);
+      const loop = () => {
+        if (!this._running || this._gen !== myGen) return;
+        this._processOneFrame();
+        this._video.requestVideoFrameCallback(loop);
+      };
+      video.requestVideoFrameCallback(loop);
     } else {
-      this._rAFLoop = this._rAFLoop.bind(this);
-      this._rafId = requestAnimationFrame(this._rAFLoop);
+      const loop = () => {
+        if (!this._running || this._gen !== myGen) return;
+        this._processOneFrame();
+        this._rafId = requestAnimationFrame(loop);
+      };
+      this._rafId = requestAnimationFrame(loop);
     }
   }
 
@@ -394,19 +407,7 @@ class FrameProcessor {
       cancelAnimationFrame(this._rafId);
       this._rafId = null;
     }
-    // rVFC loops cancel themselves when _running becomes false.
-  }
-
-  _rVFCLoop() {
-    if (!this._running) return;
-    this._processOneFrame();
-    this._video.requestVideoFrameCallback(this._rVFCLoop);
-  }
-
-  _rAFLoop() {
-    if (!this._running) return;
-    this._processOneFrame();
-    this._rafId = requestAnimationFrame(this._rAFLoop);
+    // rVFC loops self-terminate via the generation check.
   }
 
   _processOneFrame() {
@@ -563,12 +564,14 @@ class BackgroundQualityManager {
 
 // YouTube VP9/AV1 average bitrates (Mbps) by resolution + framerate tier.
 const _YT_BITRATE = {
-  2160: { 30: 16, 60: 24 },
-  1440: { 30:  8, 60: 13 },
-  1080: { 30:  5, 60:  8 },
-   720: { 30:  3, 60:  5 },
-   480: { 30: 1.5, 60: 2.5 },
-   360: { 30: 0.8, 60: 1.2 },
+  2160: { 30: 16,  60: 24   },
+  1440: { 30:  8,  60: 13   },
+  1080: { 30:  5,  60:  8   },
+   720: { 30:  3,  60:  5   },
+   480: { 30: 1.5, 60:  2.5 },
+   360: { 30: 0.8, 60:  1.2 },
+   240: { 30: 0.3, 60:  0.5 },
+   144: { 30: 0.1, 60:  0.15 },
 };
 
 // Network energy per GB (Wh/GB) at WiFi baseline — comprehensive system boundary
@@ -598,8 +601,8 @@ function _networkMultiplier(rtt, effectiveType) {
 }
 
 function _ytBitrate(height, fps) {
-  const heights = [2160, 1440, 1080, 720, 480, 360];
-  const h = heights.find(t => height >= t) ?? 360;
+  const heights = [2160, 1440, 1080, 720, 480, 360, 240, 144];
+  const h = heights.find(t => height >= t) ?? 144;
   return _YT_BITRATE[h]?.[fps > 35 ? 60 : 30] ?? 5;
 }
 
@@ -1216,11 +1219,18 @@ async function _onVideoReady(video, settings) {
   const handleToggle = (enabled) => {
     _settingsManager.save({ enabled, status: enabled ? 'active' : 'off' });
     _overlayManager && _overlayManager.setVisible(enabled);
+    _aiUpscaler && _aiUpscaler.setVisible(enabled);
 
     if (enabled) {
       _perfMonitor && _perfMonitor.reset();
       if (_frameProcessor && _upscalerPipeline && _perfMonitor) {
         _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
+        // Frame loop skips paused video — force-render the current frame immediately
+        // so the canvas never shows a stale frame from a previous session.
+        if (video.readyState >= 2) {
+          _upscalerPipeline.processFrame();
+          _aiUpscaler && _aiUpscaler.processFrame();
+        }
       }
       _energyTracker && _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
     } else {
@@ -1250,6 +1260,10 @@ async function _onVideoReady(video, settings) {
 
   _upscalerPipeline = new UpscalerPipeline(canvas, video, settings);
   await _upscalerPipeline.init();
+
+  _aiUpscaler = new AITileUpscaler(playerContainer, video);
+  await _aiUpscaler.init();
+  _aiUpscaler.setVisible(settings.enabled);
 
   _energyTracker = new EnergyTracker();
   await _energyTracker.load();
@@ -1297,10 +1311,15 @@ async function _onVideoReady(video, settings) {
     if (!_initialized) return;
     if ('enabled' in changed) {
       _overlayManager.setVisible(all.enabled);
+      _aiUpscaler && _aiUpscaler.setVisible(all.enabled);
       _uiManager && _uiManager.updateToggle(all.enabled);
       if (all.enabled) {
         _perfMonitor.reset();
         _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
+        if (video.readyState >= 2) {
+          _upscalerPipeline.processFrame();
+          _aiUpscaler && _aiUpscaler.processFrame();
+        }
         _energyTracker && _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
       } else {
         _frameProcessor.stop();

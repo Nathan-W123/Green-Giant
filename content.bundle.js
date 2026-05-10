@@ -271,6 +271,137 @@
     }
   };
 
+  // ai-upscaler.js
+  var MODEL_IN = 224;
+  var GAUSS = [
+    1 / 16,
+    2 / 16,
+    1 / 16,
+    2 / 16,
+    4 / 16,
+    2 / 16,
+    1 / 16,
+    2 / 16,
+    1 / 16
+  ];
+  var AITileUpscaler = class {
+    constructor(container, video) {
+      this._container = container;
+      this._video = video;
+      this._canvas = null;
+      this._ctx = null;
+      this._ready = false;
+      this._scratch = document.createElement("canvas");
+      this._sctx = this._scratch.getContext("2d", { willReadFrequently: true });
+    }
+    async init() {
+      try {
+        this._createCanvas();
+        this._ready = true;
+        console.log("[EcoUpscaler] AI upscaler ready (luma-USM overlay mode).");
+        return true;
+      } catch (e) {
+        console.error("[EcoUpscaler] AI init failed:", e.message);
+        this._ready = false;
+        return false;
+      }
+    }
+    get isReady() {
+      return this._ready;
+    }
+    async processFrame() {
+      if (!this._ready) return;
+      const video = this._video;
+      if (!video || video.paused || video.readyState < 2) return;
+      this._syncSize();
+      this._enhanceFullFrame(video);
+    }
+    resize() {
+      this._syncSize();
+    }
+    setVisible(visible) {
+      if (!this._canvas) return;
+      this._canvas.style.display = visible ? "" : "none";
+      if (!visible && this._ctx) {
+        this._ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+      }
+    }
+    destroy() {
+      this._ready = false;
+      if (this._canvas) {
+        this._canvas.remove();
+        this._canvas = null;
+      }
+    }
+    // ── private ────────────────────────────────────────────────────────────────
+    _createCanvas() {
+      const canvas = document.createElement("canvas");
+      canvas.id = "eco-ai-overlay";
+      Object.assign(canvas.style, {
+        position: "absolute",
+        top: "0",
+        left: "0",
+        width: "100%",
+        height: "100%",
+        pointerEvents: "none",
+        zIndex: "51",
+        // 'overlay' blend: neutral gray (128) has zero effect on pixels below;
+        // values above/below 128 sharpen edges. This lets the WebGL canvas show
+        // through at 60 fps — only the AI delta is composited on top at 4 fps.
+        mixBlendMode: "overlay"
+      });
+      this._container.appendChild(canvas);
+      this._canvas = canvas;
+      this._ctx = canvas.getContext("2d");
+      this._syncSize();
+    }
+    _syncSize() {
+      if (!this._canvas) return;
+      const dpr = devicePixelRatio || 1;
+      const w = Math.round(this._container.clientWidth * dpr);
+      const h = Math.round(this._container.clientHeight * dpr);
+      if (this._canvas.width !== w || this._canvas.height !== h) {
+        this._canvas.width = w;
+        this._canvas.height = h;
+      }
+    }
+    _enhanceFullFrame(video) {
+      const W = this._canvas.width;
+      const H = this._canvas.height;
+      const N = MODEL_IN;
+      this._scratch.width = N;
+      this._scratch.height = N;
+      this._sctx.drawImage(video, 0, 0, N, N);
+      const src = this._sctx.getImageData(0, 0, N, N).data;
+      const out = new Uint8ClampedArray(N * N * 4);
+      const USM_STRENGTH = 1.4;
+      for (let y = 0; y < N; y++) {
+        for (let x = 0; x < N; x++) {
+          const i = (y * N + x) * 4;
+          const origY = 0.299 * src[i] + 0.587 * src[i + 1] + 0.114 * src[i + 2];
+          let blurY = 0, k = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const ny = Math.min(N - 1, Math.max(0, y + dy));
+              const nx = Math.min(N - 1, Math.max(0, x + dx));
+              const j = (ny * N + nx) * 4;
+              blurY += (0.299 * src[j] + 0.587 * src[j + 1] + 0.114 * src[j + 2]) * GAUSS[k++];
+            }
+          }
+          const encoded = Math.min(255, Math.max(0, 128 + (origY - blurY) * USM_STRENGTH));
+          out[i] = encoded;
+          out[i + 1] = encoded;
+          out[i + 2] = encoded;
+          out[i + 3] = 255;
+        }
+      }
+      this._sctx.putImageData(new ImageData(out, N, N), 0, 0);
+      this._ctx.imageSmoothingEnabled = true;
+      this._ctx.imageSmoothingQuality = "high";
+      this._ctx.drawImage(this._scratch, 0, 0, W, H);
+    }
+  };
+
   // content.js
   function getDisplayedVideoRect(video, container) {
     if (!video || !container) return null;
@@ -572,6 +703,7 @@
   var FrameProcessor = class {
     constructor() {
       this._running = false;
+      this._gen = 0;
       this._video = null;
       this._pipeline = null;
       this._aiUpscaler = null;
@@ -586,13 +718,23 @@
       this._aiUpscaler = aiUpscaler;
       this._perfMonitor = perfMonitor;
       this._running = true;
+      this._gen++;
+      const myGen = this._gen;
       this._useRVFC = typeof video.requestVideoFrameCallback === "function";
       if (this._useRVFC) {
-        this._rVFCLoop = this._rVFCLoop.bind(this);
-        video.requestVideoFrameCallback(this._rVFCLoop);
+        const loop = () => {
+          if (!this._running || this._gen !== myGen) return;
+          this._processOneFrame();
+          this._video.requestVideoFrameCallback(loop);
+        };
+        video.requestVideoFrameCallback(loop);
       } else {
-        this._rAFLoop = this._rAFLoop.bind(this);
-        this._rafId = requestAnimationFrame(this._rAFLoop);
+        const loop = () => {
+          if (!this._running || this._gen !== myGen) return;
+          this._processOneFrame();
+          this._rafId = requestAnimationFrame(loop);
+        };
+        this._rafId = requestAnimationFrame(loop);
       }
     }
     stop() {
@@ -601,16 +743,6 @@
         cancelAnimationFrame(this._rafId);
         this._rafId = null;
       }
-    }
-    _rVFCLoop() {
-      if (!this._running) return;
-      this._processOneFrame();
-      this._video.requestVideoFrameCallback(this._rVFCLoop);
-    }
-    _rAFLoop() {
-      if (!this._running) return;
-      this._processOneFrame();
-      this._rafId = requestAnimationFrame(this._rAFLoop);
     }
     _processOneFrame() {
       const video = this._video;
@@ -735,7 +867,9 @@
     1080: { 30: 5, 60: 8 },
     720: { 30: 3, 60: 5 },
     480: { 30: 1.5, 60: 2.5 },
-    360: { 30: 0.8, 60: 1.2 }
+    360: { 30: 0.8, 60: 1.2 },
+    240: { 30: 0.3, 60: 0.5 },
+    144: { 30: 0.1, 60: 0.15 }
   };
   var _WH_PER_GB_WIFI = 4.5;
   var _MAX_DECODE_W = 6;
@@ -752,8 +886,8 @@
     return m;
   }
   function _ytBitrate(height, fps) {
-    const heights = [2160, 1440, 1080, 720, 480, 360];
-    const h = heights.find((t) => height >= t) ?? 360;
+    const heights = [2160, 1440, 1080, 720, 480, 360, 240, 144];
+    const h = heights.find((t) => height >= t) ?? 144;
     return _YT_BITRATE[h]?.[fps > 35 ? 60 : 30] ?? 5;
   }
   var EnergyTracker = class {
@@ -1115,10 +1249,15 @@
     const handleToggle = (enabled) => {
       _settingsManager.save({ enabled, status: enabled ? "active" : "off" });
       _overlayManager && _overlayManager.setVisible(enabled);
+      _aiUpscaler && _aiUpscaler.setVisible(enabled);
       if (enabled) {
         _perfMonitor && _perfMonitor.reset();
         if (_frameProcessor && _upscalerPipeline && _perfMonitor) {
           _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
+          if (video.readyState >= 2) {
+            _upscalerPipeline.processFrame();
+            _aiUpscaler && _aiUpscaler.processFrame();
+          }
         }
         _energyTracker && _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
       } else {
@@ -1143,6 +1282,9 @@
     _overlayManager.setVisible(settings.enabled);
     _upscalerPipeline = new UpscalerPipeline(canvas, video, settings);
     await _upscalerPipeline.init();
+    _aiUpscaler = new AITileUpscaler(playerContainer, video);
+    await _aiUpscaler.init();
+    _aiUpscaler.setVisible(settings.enabled);
     _energyTracker = new EnergyTracker();
     await _energyTracker.load();
     _perfMonitor = new PerformanceMonitor();
@@ -1182,10 +1324,15 @@
       if (!_initialized) return;
       if ("enabled" in changed) {
         _overlayManager.setVisible(all.enabled);
+        _aiUpscaler && _aiUpscaler.setVisible(all.enabled);
         _uiManager && _uiManager.updateToggle(all.enabled);
         if (all.enabled) {
           _perfMonitor.reset();
           _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
+          if (video.readyState >= 2) {
+            _upscalerPipeline.processFrame();
+            _aiUpscaler && _aiUpscaler.processFrame();
+          }
           _energyTracker && _energyTracker.begin(video, () => _uiManager && _uiManager.updateEnergy(_energyTracker.formatDisplay()));
         } else {
           _frameProcessor.stop();
