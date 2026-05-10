@@ -5,15 +5,14 @@
   "description": "Lightweight natural video enhancement for YouTube. Watch 1080p, see closer to 4K.",
   "permissions": ["storage"],
   "host_permissions": ["https://www.youtube.com/*"],
-  "minimum_chrome_version": "93",
+  "minimum_chrome_version": "88",
   "content_scripts": [
     {
       "matches": ["https://www.youtube.com/*"],
       "js": ["lib/ort.min.js", "content.bundle.js"],
       "css": ["styles.css"],
       "run_at": "document_idle",
-      "all_frames": false,
-      "type": "module"
+      "all_frames": false
     }
   ],
   "action": {

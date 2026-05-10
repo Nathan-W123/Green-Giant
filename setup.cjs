@@ -1,7 +1,7 @@
-// Builds lib/ort.min.js by bundling ort.bundle.min.mjs (WASM baked-in as base64)
-// into a plain IIFE that sets globalThis.ort. No external WASM fetch needed,
-// which is required for Chrome extension content script contexts where
-// dynamic import() of chrome-extension:// URLs is blocked.
+// Builds lib/ort.min.js from ort.bundle.min.mjs (worker code inlined) as an IIFE,
+// then patches all import.meta.url references to location.href so it runs as a
+// classic content script. Also copies the WASM binary to lib/ so ORT can fetch
+// it via an explicit chrome-extension:// wasmPaths override at runtime.
 const fs      = require('fs');
 const path    = require('path');
 const esbuild = require('esbuild');
@@ -24,13 +24,36 @@ try {
   esbuild.buildSync({
     entryPoints: [entry],
     bundle:      true,
-    format:      'esm',
+    format:      'iife',
     outfile:     path.join(dest, 'ort.min.js'),
   });
+
+  // Patch import.meta.url → location.href.
+  // Chrome extension content scripts are classic scripts (import.meta is invalid).
+  // ORT uses this URL only to locate WASM files; we override that via wasmPaths
+  // at runtime, so location.href is a safe substitute (avoids SyntaxError, and
+  // the actual URL is never used because wasmPaths takes precedence).
+  let ortJs = fs.readFileSync(path.join(dest, 'ort.min.js'), 'utf8');
+  const count = (ortJs.match(/\bimport\.meta\.url\b/g) || []).length;
+  ortJs = ortJs.replace(/\bimport\.meta\.url\b/g, 'location.href');
+  fs.writeFileSync(path.join(dest, 'ort.min.js'), ortJs);
+
   const kb = Math.round(fs.statSync(path.join(dest, 'ort.min.js')).size / 1024);
-  console.log(`[setup] Built lib/ort.min.js (${kb} KB, WASM embedded — no external fetch)`);
+  console.log(`[setup] Built lib/ort.min.js (${kb} KB, patched ${count} import.meta.url refs)`);
 } finally {
   fs.unlinkSync(entry);
+}
+
+// Copy the WASM binary that ORT will fetch at inference time via wasmPaths.
+const wasmName = 'ort-wasm-simd-threaded.wasm';
+const wasmSrc  = path.join(src, wasmName);
+const wasmDest = path.join(dest, wasmName);
+if (fs.existsSync(wasmSrc)) {
+  fs.copyFileSync(wasmSrc, wasmDest);
+  const wasmKb = Math.round(fs.statSync(wasmDest).size / 1024);
+  console.log(`[setup] Copied ${wasmName} (${wasmKb} KB) to lib/`);
+} else {
+  console.warn(`[setup] ${wasmName} not found in dist — ORT WASM init will fail`);
 }
 
 const modelsDir  = path.join(__dirname, 'models');

@@ -5,8 +5,8 @@
   "main": "content.js",
   "scripts": {
     "setup": "node setup.cjs",
-    "build": "node setup.cjs && esbuild content.js --bundle --format=esm --outfile=content.bundle.js",
-    "watch": "node setup.cjs && esbuild content.js --bundle --format=esm --outfile=content.bundle.js --watch"
+    "build": "node setup.cjs && esbuild content.js --bundle --format=iife --outfile=content.bundle.js",
+    "watch": "node setup.cjs && esbuild content.js --bundle --format=iife --outfile=content.bundle.js --watch"
   },
   "keywords": [],
   "author": "",

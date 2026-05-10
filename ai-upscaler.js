@@ -69,13 +69,17 @@ export class AITileUpscaler {
     const ort = window.ort;
     if (!ort) throw new Error('window.ort not found — ensure lib/ort.min.js loads first');
 
-    // proxy=false: run WASM inference on the main thread with no worker.
-    // Content script workers cannot resolve chrome-extension:// URLs, so ORT's
-    // default proxy worker always fails with "cannot determine script source URL".
-    // numThreads=1 + proxy=false = single-threaded main-thread execution.
-    // WASM binary is embedded in ort.min.js (built from ort.bundle.min.mjs).
+    // proxy=false: run WASM inference on the main thread (no ORT proxy worker).
+    // numThreads=1: single-threaded — avoids SharedArrayBuffer requirement.
+    // wasmPaths: explicit chrome-extension:// URL bypasses ORT's import.meta.url
+    // URL detection, which is patched to location.href in the built lib/ort.min.js.
     ort.env.wasm.proxy      = false;
     ort.env.wasm.numThreads = 1;
+    // ORT reads wasmPaths.wasm (not filename-keyed) to set its locateFile function,
+    // which takes precedence over the import_meta.url-based URL detection.
+    ort.env.wasm.wasmPaths  = {
+      wasm: chrome.runtime.getURL('lib/ort-wasm-simd-threaded.wasm'),
+    };
 
     const candidates = [
       { file: 'models/super-resolution-int8.onnx', dtype: 'float32' },
