@@ -628,6 +628,7 @@
   var FrameProcessor = class {
     constructor() {
       this._running = false;
+      this._gen = 0;
       this._video = null;
       this._pipeline = null;
       this._aiUpscaler = null;
@@ -642,13 +643,23 @@
       this._aiUpscaler = aiUpscaler;
       this._perfMonitor = perfMonitor;
       this._running = true;
+      this._gen++;
+      const myGen = this._gen;
       this._useRVFC = typeof video.requestVideoFrameCallback === "function";
       if (this._useRVFC) {
-        this._rVFCLoop = this._rVFCLoop.bind(this);
-        video.requestVideoFrameCallback(this._rVFCLoop);
+        const loop = () => {
+          if (!this._running || this._gen !== myGen) return;
+          this._processOneFrame();
+          this._video.requestVideoFrameCallback(loop);
+        };
+        video.requestVideoFrameCallback(loop);
       } else {
-        this._rAFLoop = this._rAFLoop.bind(this);
-        this._rafId = requestAnimationFrame(this._rAFLoop);
+        const loop = () => {
+          if (!this._running || this._gen !== myGen) return;
+          this._processOneFrame();
+          this._rafId = requestAnimationFrame(loop);
+        };
+        this._rafId = requestAnimationFrame(loop);
       }
     }
     stop() {
@@ -657,16 +668,6 @@
         cancelAnimationFrame(this._rafId);
         this._rafId = null;
       }
-    }
-    _rVFCLoop() {
-      if (!this._running) return;
-      this._processOneFrame();
-      this._video.requestVideoFrameCallback(this._rVFCLoop);
-    }
-    _rAFLoop() {
-      if (!this._running) return;
-      this._processOneFrame();
-      this._rafId = requestAnimationFrame(this._rAFLoop);
     }
     _processOneFrame() {
       const video = this._video;

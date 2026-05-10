@@ -280,6 +280,7 @@ class OverlayManager {
 class FrameProcessor {
   constructor() {
     this._running = false;
+    this._gen    = 0;   // generation counter — incremented on every start()
     this._video = null;
     this._pipeline = null;
     this._aiUpscaler = null;
@@ -295,14 +296,26 @@ class FrameProcessor {
     this._aiUpscaler = aiUpscaler;
     this._perfMonitor = perfMonitor;
     this._running = true;
+    this._gen++;                  // invalidate any callbacks from previous loops
+    const myGen = this._gen;
+
     this._useRVFC = typeof video.requestVideoFrameCallback === 'function';
 
     if (this._useRVFC) {
-      this._rVFCLoop = this._rVFCLoop.bind(this);
-      video.requestVideoFrameCallback(this._rVFCLoop);
+      const loop = () => {
+        // Bail if this callback belongs to a superseded loop.
+        if (!this._running || this._gen !== myGen) return;
+        this._processOneFrame();
+        this._video.requestVideoFrameCallback(loop);
+      };
+      video.requestVideoFrameCallback(loop);
     } else {
-      this._rAFLoop = this._rAFLoop.bind(this);
-      this._rafId = requestAnimationFrame(this._rAFLoop);
+      const loop = () => {
+        if (!this._running || this._gen !== myGen) return;
+        this._processOneFrame();
+        this._rafId = requestAnimationFrame(loop);
+      };
+      this._rafId = requestAnimationFrame(loop);
     }
   }
 
@@ -312,19 +325,7 @@ class FrameProcessor {
       cancelAnimationFrame(this._rafId);
       this._rafId = null;
     }
-    // rVFC loops cancel themselves when _running becomes false.
-  }
-
-  _rVFCLoop() {
-    if (!this._running) return;
-    this._processOneFrame();
-    this._video.requestVideoFrameCallback(this._rVFCLoop);
-  }
-
-  _rAFLoop() {
-    if (!this._running) return;
-    this._processOneFrame();
-    this._rafId = requestAnimationFrame(this._rAFLoop);
+    // rVFC loops self-terminate via the generation check.
   }
 
   _processOneFrame() {
