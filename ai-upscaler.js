@@ -23,7 +23,7 @@ export class AITileUpscaler {
     this._ready      = false;
     this._lastMs     = 0;
     this._scratch    = document.createElement('canvas');
-    this._sctx       = this._scratch.getContext('2d');
+    this._sctx       = this._scratch.getContext('2d', { willReadFrequently: true });
   }
 
   async init() {
