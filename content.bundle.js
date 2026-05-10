@@ -338,35 +338,37 @@
     async _initORT() {
       const ort = window.ort;
       if (!ort) throw new Error("window.ort not found \u2014 ensure lib/ort.min.js loads first");
-      ort.env.wasm.wasmPaths = chrome.runtime.getURL("lib/");
+      ort.env.wasm.proxy = false;
       ort.env.wasm.numThreads = 1;
-      ort.env.wasm.simd = true;
+      ort.env.wasm.wasmPaths = chrome.runtime.getURL("lib/");
       const candidates = [
-        { file: "models/super-resolution-fp16.onnx", dtype: "float16" },
         { file: "models/super-resolution-int8.onnx", dtype: "float32" },
         { file: "models/super-resolution-10.onnx", dtype: "float32" }
       ];
-      let modelUrl = null;
+      let modelBytes = null;
       let dtype = "float32";
+      let modelName = "";
       for (const c of candidates) {
-        const url = chrome.runtime.getURL(c.file);
         try {
-          const res = await fetch(url, { method: "HEAD" });
+          const url = chrome.runtime.getURL(c.file);
+          const res = await fetch(url);
           if (res.ok) {
-            modelUrl = url;
+            modelBytes = new Uint8Array(await res.arrayBuffer());
             dtype = c.dtype;
+            modelName = c.file;
             break;
           }
-        } catch {
+        } catch (e) {
+          console.warn(`[EcoUpscaler] fetch ${c.file}:`, e.message);
         }
       }
-      if (!modelUrl) throw new Error("No model file found in models/");
-      this._session = await ort.InferenceSession.create(modelUrl, {
+      if (!modelBytes) throw new Error("No model file found in models/");
+      this._session = await ort.InferenceSession.create(modelBytes, {
         executionProviders: ["wasm"],
         graphOptimizationLevel: "all"
       });
       this._inputDtype = dtype;
-      console.log(`[EcoUpscaler] Loaded ${modelUrl.split("/").pop()} (${dtype})`);
+      console.log(`[EcoUpscaler] AI ready: ${modelName} (${(modelBytes.length / 1024).toFixed(0)} KB, ${dtype})`);
     }
     _createCanvas() {
       const canvas = document.createElement("canvas");

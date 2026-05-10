@@ -69,36 +69,42 @@ export class AITileUpscaler {
     const ort = window.ort;
     if (!ort) throw new Error('window.ort not found — ensure lib/ort.min.js loads first');
 
-    ort.env.wasm.wasmPaths  = chrome.runtime.getURL('lib/');
+    // proxy=false: ORT must run on the main thread, not a blob-URL worker.
+    // Workers spawned from blob:// cannot reach chrome-extension:// WASM binaries,
+    // causing silent init failure in all content script contexts.
+    ort.env.wasm.proxy      = false;
     ort.env.wasm.numThreads = 1;
-    ort.env.wasm.simd       = true;
+    ort.env.wasm.wasmPaths  = chrome.runtime.getURL('lib/');
 
     const candidates = [
-      { file: 'models/super-resolution-fp16.onnx', dtype: 'float16' },
-      { file: 'models/super-resolution-int8.onnx',  dtype: 'float32' },
-      { file: 'models/super-resolution-10.onnx',    dtype: 'float32' },
+      { file: 'models/super-resolution-int8.onnx', dtype: 'float32' },
+      { file: 'models/super-resolution-10.onnx',   dtype: 'float32' },
     ];
 
-    let modelUrl = null;
-    let dtype    = 'float32';
+    let modelBytes = null;
+    let dtype      = 'float32';
+    let modelName  = '';
     for (const c of candidates) {
-      const url = chrome.runtime.getURL(c.file);
       try {
-        const res = await fetch(url, { method: 'HEAD' });
-        if (res.ok) { modelUrl = url; dtype = c.dtype; break; }
-      } catch { /* absent */ }
+        const url = chrome.runtime.getURL(c.file);
+        const res = await fetch(url);
+        if (res.ok) {
+          modelBytes = new Uint8Array(await res.arrayBuffer());
+          dtype      = c.dtype;
+          modelName  = c.file;
+          break;
+        }
+      } catch (e) { console.warn(`[EcoUpscaler] fetch ${c.file}:`, e.message); }
     }
-    if (!modelUrl) throw new Error('No model file found in models/');
+    if (!modelBytes) throw new Error('No model file found in models/');
 
-    // WebGL EP is unreliable in content script isolated worlds (GPU sandbox differs
-    // from page JS context). WASM with SIMD is fully reliable and plenty fast for
-    // 224x224 inference at 4fps.
-    this._session    = await ort.InferenceSession.create(modelUrl, {
+    // Pass raw bytes — avoids chrome-extension:// URL resolution inside ORT loader.
+    this._session = await ort.InferenceSession.create(modelBytes, {
       executionProviders:     ['wasm'],
       graphOptimizationLevel: 'all',
     });
     this._inputDtype = dtype;
-    console.log(`[EcoUpscaler] Loaded ${modelUrl.split('/').pop()} (${dtype})`);
+    console.log(`[EcoUpscaler] AI ready: ${modelName} (${(modelBytes.length / 1024).toFixed(0)} KB, ${dtype})`);
   }
 
   _createCanvas() {
