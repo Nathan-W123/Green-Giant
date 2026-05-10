@@ -2374,7 +2374,6 @@
       this._resizeObserver = null;
       this._fsHandler = null;
       this._theaterObserver = null;
-      this._useHalfRes = false;
     }
     create(video) {
       this._video = video;
@@ -2383,10 +2382,6 @@
       canvas.id = "eco-upscaler-overlay";
       this._player.appendChild(canvas);
       this._canvas = canvas;
-      const dpr = devicePixelRatio;
-      const displayW = this._player.clientWidth * dpr;
-      const srcW = video.videoWidth;
-      this._useHalfRes = srcW > 0 && srcW < displayW / 2;
       this._updateCanvasSize();
       this._startResizeObserver();
       this._handleFullscreen();
@@ -2421,9 +2416,7 @@
         this._canvas.style.display = visible ? "block" : "none";
       }
     }
-    // Updates the canvas pixel buffer size to match the player's current display size,
-    // scaled by 0.5 when _useHalfRes is true (Option B). The scale factor never changes
-    // after create() so every call produces proportional-but-stable dimensions.
+    // Updates the canvas pixel buffer size to match the player's current display size.
     _updateCanvasSize() {
       const canvas = this._canvas;
       const container = this._player;
@@ -2432,9 +2425,8 @@
       const w = container.clientWidth;
       const h = container.clientHeight;
       if (w === 0 || h === 0) return;
-      const scale = this._useHalfRes ? 0.5 : 1;
-      canvas.width = Math.round(w * dpr * scale);
-      canvas.height = Math.round(h * dpr * scale);
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
     }
     _startResizeObserver() {
       this._resizeObserver = new ResizeObserver(() => {
@@ -2467,8 +2459,6 @@
       this._perfMonitor = null;
       this._rafId = null;
       this._useRVFC = false;
-      this._lastFrameTime = 0;
-      this._minFrameInterval = 1e3 / 12;
     }
     start(video, pipeline, perfMonitor) {
       this.stop();
@@ -2508,11 +2498,9 @@
       if (document.hidden) return;
       if (video.paused || video.ended) return;
       if (video.readyState < 2) return;
-      const now = performance.now();
-      if (now - this._lastFrameTime < this._minFrameInterval) return;
-      this._lastFrameTime = now;
+      const t0 = performance.now();
       this._pipeline.processFrame();
-      this._perfMonitor.recordFrame(performance.now() - now);
+      this._perfMonitor.recordFrame(performance.now() - t0);
     }
   };
   var PerformanceMonitor = class {
