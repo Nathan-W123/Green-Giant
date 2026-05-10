@@ -17,9 +17,10 @@ export class AITileUpscaler {
     this._video     = video;
     this._canvas    = null;
     this._ctx       = null;
-    this._session   = null;
-    this._detector  = null;
-    this._ready     = false;
+    this._session    = null;
+    this._inputDtype = 'float32';
+    this._detector   = null;
+    this._ready      = false;
     this._lastMs    = 0;
     // Scratch canvas for tile capture and color reconstruction
     this._scratch   = document.createElement('canvas');
@@ -84,15 +85,34 @@ export class AITileUpscaler {
     const ort = window.ort;
     if (!ort) throw new Error('window.ort not found — ensure lib/ort.min.js loads first');
 
-    // Point WASM loader at extension-packaged WASM files.
-    ort.env.wasm.wasmPaths = chrome.runtime.getURL('lib/');
-    ort.env.wasm.numThreads = 1; // single-threaded: avoids SharedArrayBuffer requirement
+    ort.env.wasm.wasmPaths  = chrome.runtime.getURL('lib/');
+    ort.env.wasm.numThreads = 1; // avoids SharedArrayBuffer requirement
 
-    const modelUrl = chrome.runtime.getURL('models/super-resolution-10.onnx');
-    this._session = await ort.InferenceSession.create(modelUrl, {
-      executionProviders: ['webgl', 'wasm'],
+    // Prefer quantized models: FP16 (half bandwidth on WebGL) → INT8 (faster WASM)
+    // → original FP32. Probed by HEAD request to avoid 404 errors.
+    const candidates = [
+      { file: 'models/super-resolution-fp16.onnx', dtype: 'float16' },
+      { file: 'models/super-resolution-int8.onnx',  dtype: 'float32' }, // INT8 weights, FP32 I/O
+      { file: 'models/super-resolution-10.onnx',    dtype: 'float32' },
+    ];
+
+    let modelUrl = null;
+    let dtype    = 'float32';
+    for (const c of candidates) {
+      const url = chrome.runtime.getURL(c.file);
+      try {
+        const res = await fetch(url, { method: 'HEAD' });
+        if (res.ok) { modelUrl = url; dtype = c.dtype; break; }
+      } catch { /* file absent */ }
+    }
+    if (!modelUrl) throw new Error('No model file found in models/');
+
+    this._session   = await ort.InferenceSession.create(modelUrl, {
+      executionProviders:     ['webgl', 'wasm'],
       graphOptimizationLevel: 'all',
     });
+    this._inputDtype = dtype;
+    console.log(`[EcoUpscaler] Loaded ${modelUrl.split('/').pop()} (${dtype})`);
   }
 
   async _initDetector() {
@@ -157,7 +177,18 @@ export class AITileUpscaler {
     const ort = window.ort;
     let outLuma;
     try {
-      const feeds   = { input: new ort.Tensor('float32', luma, [1, 1, MODEL_IN, MODEL_IN]) };
+      // Use FP16 typed array when the loaded model expects half-precision weights.
+      // Float16Array is supported in V8 (Chrome 114+); fall back to float32 if absent.
+      let inputData = luma;
+      let dtype = this._inputDtype ?? 'float32';
+      if (dtype === 'float16') {
+        if (typeof Float16Array !== 'undefined') {
+          inputData = new Float16Array(luma);
+        } else {
+          dtype = 'float32'; // V8 too old — still works, just no bandwidth saving
+        }
+      }
+      const feeds = { input: new ort.Tensor(dtype, inputData, [1, 1, MODEL_IN, MODEL_IN]) };
       const results = await this._session.run(feeds);
       outLuma = results[Object.keys(results)[0]].data;
     } catch (e) {

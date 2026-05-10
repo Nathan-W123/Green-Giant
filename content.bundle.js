@@ -284,6 +284,7 @@
       this._canvas = null;
       this._ctx = null;
       this._session = null;
+      this._inputDtype = "float32";
       this._detector = null;
       this._ready = false;
       this._lastMs = 0;
@@ -351,11 +352,33 @@
       if (!ort) throw new Error("window.ort not found \u2014 ensure lib/ort.min.js loads first");
       ort.env.wasm.wasmPaths = chrome.runtime.getURL("lib/");
       ort.env.wasm.numThreads = 1;
-      const modelUrl = chrome.runtime.getURL("models/super-resolution-10.onnx");
+      const candidates = [
+        { file: "models/super-resolution-fp16.onnx", dtype: "float16" },
+        { file: "models/super-resolution-int8.onnx", dtype: "float32" },
+        // INT8 weights, FP32 I/O
+        { file: "models/super-resolution-10.onnx", dtype: "float32" }
+      ];
+      let modelUrl = null;
+      let dtype = "float32";
+      for (const c of candidates) {
+        const url = chrome.runtime.getURL(c.file);
+        try {
+          const res = await fetch(url, { method: "HEAD" });
+          if (res.ok) {
+            modelUrl = url;
+            dtype = c.dtype;
+            break;
+          }
+        } catch {
+        }
+      }
+      if (!modelUrl) throw new Error("No model file found in models/");
       this._session = await ort.InferenceSession.create(modelUrl, {
         executionProviders: ["webgl", "wasm"],
         graphOptimizationLevel: "all"
       });
+      this._inputDtype = dtype;
+      console.log(`[EcoUpscaler] Loaded ${modelUrl.split("/").pop()} (${dtype})`);
     }
     async _initDetector() {
       if (!("FaceDetector" in window)) throw new Error("FaceDetector API not available");
@@ -415,7 +438,16 @@
       const ort = window.ort;
       let outLuma;
       try {
-        const feeds = { input: new ort.Tensor("float32", luma, [1, 1, MODEL_IN, MODEL_IN]) };
+        let inputData = luma;
+        let dtype = this._inputDtype ?? "float32";
+        if (dtype === "float16") {
+          if (typeof Float16Array !== "undefined") {
+            inputData = new Float16Array(luma);
+          } else {
+            dtype = "float32";
+          }
+        }
+        const feeds = { input: new ort.Tensor(dtype, inputData, [1, 1, MODEL_IN, MODEL_IN]) };
         const results = await this._session.run(feeds);
         outLuma = results[Object.keys(results)[0]].data;
       } catch (e) {
