@@ -291,16 +291,21 @@
       this._sctx2 = this._scratch2.getContext("2d");
     }
     async init() {
-      try {
-        await this._initORT();
-        this._createCanvas();
-        this._ready = true;
-        console.log("[EcoUpscaler] AI upscaler ready (full-frame mode).");
-      } catch (e) {
-        console.warn("[EcoUpscaler] AI upscaler unavailable:", e.message);
-        this._ready = false;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await this._initORT();
+          this._createCanvas();
+          this._ready = true;
+          console.log("[EcoUpscaler] AI upscaler ready (full-frame mode).");
+          return true;
+        } catch (e) {
+          console.warn(`[EcoUpscaler] AI init attempt ${attempt}/3 failed: ${e.message}`);
+          if (attempt < 3) await new Promise((r) => setTimeout(r, 1e3 * attempt));
+        }
       }
-      return this._ready;
+      console.error("[EcoUpscaler] AI upscaler permanently unavailable \u2014 check models/ and lib/ directories.");
+      this._ready = false;
+      return false;
     }
     get isReady() {
       return this._ready;
@@ -1201,6 +1206,18 @@ ${totalStr} lifetime`;
         #status-badge.degraded { background: #7c2d12; color: #fb923c; }
         #status-badge.disabled { background: #450a0a; color: #f87171; }
         #res { color: #666; font-size: 10px; text-align: right; }
+        #ai-badge {
+          font-size: 10px;
+          font-weight: 600;
+          padding: 2px 7px;
+          border-radius: 20px;
+          background: #444;
+          color: #aaa;
+          letter-spacing: 0.5px;
+          text-transform: uppercase;
+        }
+        #ai-badge.on  { background: #14532d; color: #4ade80; }
+        #ai-badge.off { background: #450a0a; color: #f87171; }
         #energy {
           color: #4ade80;
           font-size: 10px;
@@ -1222,6 +1239,10 @@ ${totalStr} lifetime`;
         <div class="row">
           <label>Status</label>
           <span id="status-badge">Off</span>
+        </div>
+        <div class="row">
+          <label>AI</label>
+          <span id="ai-badge">\u2014</span>
         </div>
         <div id="res"></div>
         <div id="energy"></div>
@@ -1256,6 +1277,13 @@ ${totalStr} lifetime`;
       if (!this._shadow) return;
       const el = this._shadow.getElementById("energy");
       if (el) el.textContent = text || "";
+    }
+    updateAIStatus(ready) {
+      if (!this._shadow) return;
+      const badge = this._shadow.getElementById("ai-badge");
+      if (!badge) return;
+      badge.textContent = ready ? "Active" : "Off";
+      badge.className = ready ? "on" : "off";
     }
     updateResolution(width, height, rendererSuffix = "") {
       if (!this._shadow) return;
@@ -1307,9 +1335,10 @@ ${totalStr} lifetime`;
     _energyTracker = new EnergyTracker();
     await _energyTracker.load();
     const playerContainer = document.querySelector("#movie_player") || video.parentElement;
+    let aiReady = false;
     if (playerContainer) {
       _aiUpscaler = new AITileUpscaler(playerContainer, video);
-      await _aiUpscaler.init();
+      aiReady = await _aiUpscaler.init();
     }
     _overlayManager.setVisible(settings.enabled);
     _perfMonitor = new PerformanceMonitor();
@@ -1357,6 +1386,7 @@ ${totalStr} lifetime`;
     if (_uiManager && _energyTracker) {
       _uiManager.updateEnergy(_energyTracker.formatDisplay());
     }
+    if (_uiManager) _uiManager.updateAIStatus(aiReady);
     const rendererLabel = _upscalerPipeline.getRendererType() === "webgl" ? " \xB7 GL" : "";
     const showRes = () => {
       if (_uiManager) _uiManager.updateResolution(video.videoWidth, video.videoHeight, rendererLabel);

@@ -865,6 +865,18 @@ class UIManager {
         #status-badge.degraded { background: #7c2d12; color: #fb923c; }
         #status-badge.disabled { background: #450a0a; color: #f87171; }
         #res { color: #666; font-size: 10px; text-align: right; }
+        #ai-badge {
+          font-size: 10px;
+          font-weight: 600;
+          padding: 2px 7px;
+          border-radius: 20px;
+          background: #444;
+          color: #aaa;
+          letter-spacing: 0.5px;
+          text-transform: uppercase;
+        }
+        #ai-badge.on  { background: #14532d; color: #4ade80; }
+        #ai-badge.off { background: #450a0a; color: #f87171; }
         #energy {
           color: #4ade80;
           font-size: 10px;
@@ -886,6 +898,10 @@ class UIManager {
         <div class="row">
           <label>Status</label>
           <span id="status-badge">Off</span>
+        </div>
+        <div class="row">
+          <label>AI</label>
+          <span id="ai-badge">—</span>
         </div>
         <div id="res"></div>
         <div id="energy"></div>
@@ -926,6 +942,14 @@ class UIManager {
     if (!this._shadow) return;
     const el = this._shadow.getElementById('energy');
     if (el) el.textContent = text || '';
+  }
+
+  updateAIStatus(ready) {
+    if (!this._shadow) return;
+    const badge = this._shadow.getElementById('ai-badge');
+    if (!badge) return;
+    badge.textContent = ready ? 'Active' : 'Off';
+    badge.className   = ready ? 'on' : 'off';
   }
 
   updateResolution(width, height, rendererSuffix = '') {
@@ -989,9 +1013,10 @@ async function _onVideoReady(video, settings) {
   await _energyTracker.load();
 
   const playerContainer = document.querySelector('#movie_player') || video.parentElement;
+  let aiReady = false;
   if (playerContainer) {
     _aiUpscaler = new AITileUpscaler(playerContainer, video);
-    await _aiUpscaler.init(); // fails silently if FaceDetector/ONNX unavailable
+    aiReady = await _aiUpscaler.init();
   }
 
   _overlayManager.setVisible(settings.enabled);
@@ -1047,6 +1072,7 @@ async function _onVideoReady(video, settings) {
   if (_uiManager && _energyTracker) {
     _uiManager.updateEnergy(_energyTracker.formatDisplay());
   }
+  if (_uiManager) _uiManager.updateAIStatus(aiReady);
 
   const rendererLabel = _upscalerPipeline.getRendererType() === 'webgl' ? ' · GL' : '';
   const showRes = () => {

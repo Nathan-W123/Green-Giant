@@ -23,16 +23,21 @@ export class AITileUpscaler {
   }
 
   async init() {
-    try {
-      await this._initORT();
-      this._createCanvas();
-      this._ready = true;
-      console.log('[EcoUpscaler] AI upscaler ready (full-frame mode).');
-    } catch (e) {
-      console.warn('[EcoUpscaler] AI upscaler unavailable:', e.message);
-      this._ready = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await this._initORT();
+        this._createCanvas();
+        this._ready = true;
+        console.log('[EcoUpscaler] AI upscaler ready (full-frame mode).');
+        return true;
+      } catch (e) {
+        console.warn(`[EcoUpscaler] AI init attempt ${attempt}/3 failed: ${e.message}`);
+        if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt));
+      }
     }
-    return this._ready;
+    console.error('[EcoUpscaler] AI upscaler permanently unavailable — check models/ and lib/ directories.');
+    this._ready = false;
+    return false;
   }
 
   get isReady() { return this._ready; }
