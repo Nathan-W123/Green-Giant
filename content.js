@@ -1051,6 +1051,7 @@ async function _onVideoReady(video, settings) {
       onToggle: (enabled) => {
         _settingsManager.save({ enabled, status: enabled ? 'active' : 'off' });
         _overlayManager.setVisible(enabled);
+        _aiUpscaler && _aiUpscaler.setVisible(enabled);
         if (enabled) {
           _perfMonitor.reset();
           _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
@@ -1092,6 +1093,7 @@ async function _onVideoReady(video, settings) {
     if (!_initialized) return;
     if ('enabled' in changed) {
       _overlayManager.setVisible(all.enabled);
+      _aiUpscaler && _aiUpscaler.setVisible(all.enabled);
       _uiManager && _uiManager.updateToggle(all.enabled);
       if (all.enabled) {
         _perfMonitor.reset();

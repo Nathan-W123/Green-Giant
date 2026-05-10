@@ -300,7 +300,7 @@
       try {
         this._createCanvas();
         this._ready = true;
-        console.log("[EcoUpscaler] AI upscaler ready (JS-native luma-USM mode).");
+        console.log("[EcoUpscaler] AI upscaler ready (luma-USM overlay mode).");
         return true;
       } catch (e) {
         console.error("[EcoUpscaler] AI init failed:", e.message);
@@ -323,6 +323,13 @@
     }
     resize() {
       this._syncSize();
+    }
+    setVisible(visible) {
+      if (!this._canvas) return;
+      this._canvas.style.display = visible ? "" : "none";
+      if (!visible && this._ctx) {
+        this._ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+      }
     }
     destroy() {
       this._ready = false;
@@ -360,41 +367,44 @@
       }
     }
     _enhanceFullFrame(video) {
+      const W = this._canvas.width;
+      const H = this._canvas.height;
       const N = MODEL_IN;
+      this._ctx.imageSmoothingEnabled = true;
+      this._ctx.imageSmoothingQuality = "high";
+      this._ctx.drawImage(video, 0, 0, W, H);
       this._scratch.width = N;
       this._scratch.height = N;
       this._sctx.drawImage(video, 0, 0, N, N);
       const src = this._sctx.getImageData(0, 0, N, N).data;
-      const N2 = N * N;
-      const out = new Uint8ClampedArray(N2 * 4);
-      const USM_STRENGTH = 0.72;
+      const out = new Uint8ClampedArray(N * N * 4);
+      const USM_STRENGTH = 0.7;
       for (let y = 0; y < N; y++) {
         for (let x = 0; x < N; x++) {
           const i = (y * N + x) * 4;
-          const r = src[i], g = src[i + 1], b = src[i + 2];
-          const origY = 0.299 * r + 0.587 * g + 0.114 * b;
+          const origY = 0.299 * src[i] + 0.587 * src[i + 1] + 0.114 * src[i + 2];
           let blurY = 0, k = 0;
           for (let dy = -1; dy <= 1; dy++) {
             for (let dx = -1; dx <= 1; dx++) {
               const ny = Math.min(N - 1, Math.max(0, y + dy));
               const nx = Math.min(N - 1, Math.max(0, x + dx));
               const j = (ny * N + nx) * 4;
-              blurY += (0.299 * src[j] + 0.587 * src[j + 1] + 0.114 * src[j + 2]) * GAUSS[k];
-              k++;
+              blurY += (0.299 * src[j] + 0.587 * src[j + 1] + 0.114 * src[j + 2]) * GAUSS[k++];
             }
           }
-          const enhY = origY + (origY - blurY) * USM_STRENGTH;
-          const ratio = origY > 1 ? Math.min(enhY / origY, 2) : 1;
-          out[i] = Math.min(255, r * ratio + 0.5);
-          out[i + 1] = Math.min(255, g * ratio + 0.5);
-          out[i + 2] = Math.min(255, b * ratio + 0.5);
+          const encoded = Math.min(255, Math.max(0, 128 + (origY - blurY) * USM_STRENGTH));
+          out[i] = encoded;
+          out[i + 1] = encoded;
+          out[i + 2] = encoded;
           out[i + 3] = 255;
         }
       }
       this._sctx.putImageData(new ImageData(out, N, N), 0, 0);
-      this._ctx.imageSmoothingEnabled = true;
-      this._ctx.imageSmoothingQuality = "high";
-      this._ctx.drawImage(this._scratch, 0, 0, this._canvas.width, this._canvas.height);
+      this._ctx.globalCompositeOperation = "overlay";
+      this._ctx.globalAlpha = 0.45;
+      this._ctx.drawImage(this._scratch, 0, 0, W, H);
+      this._ctx.globalCompositeOperation = "source-over";
+      this._ctx.globalAlpha = 1;
     }
   };
 
@@ -1320,6 +1330,7 @@ ${totalStr} lifetime`;
         onToggle: (enabled) => {
           _settingsManager.save({ enabled, status: enabled ? "active" : "off" });
           _overlayManager.setVisible(enabled);
+          _aiUpscaler && _aiUpscaler.setVisible(enabled);
           if (enabled) {
             _perfMonitor.reset();
             _frameProcessor.start(video, _upscalerPipeline, _perfMonitor, _aiUpscaler);
@@ -1354,6 +1365,7 @@ ${totalStr} lifetime`;
       if (!_initialized) return;
       if ("enabled" in changed) {
         _overlayManager.setVisible(all.enabled);
+        _aiUpscaler && _aiUpscaler.setVisible(all.enabled);
         _uiManager && _uiManager.updateToggle(all.enabled);
         if (all.enabled) {
           _perfMonitor.reset();
