@@ -163,18 +163,32 @@ class OverlayManager {
     this._resizeObserver = null;
     this._fsHandler = null;
     this._theaterObserver = null;
+    this._useHalfRes = false;
   }
 
   create(video) {
     this._video = video;
-    // Append canvas inside #movie_player so our z-index (1) sits in the same stacking
-    // context as YouTube's controls (z-index 30+). CSS positions it via inset: 0.
+    // Append canvas inside #movie_player so our z-index sits in the same stacking
+    // context as YouTube's controls. CSS positions it via inset: 0.
     this._player = document.querySelector('#movie_player') || video.parentElement;
 
     const canvas = document.createElement('canvas');
     canvas.id = 'eco-upscaler-overlay';
     this._player.appendChild(canvas);
     this._canvas = canvas;
+
+    // Option B: decide half-res ONCE before the pipeline starts and never change it.
+    // Changing canvas dimensions after Anime4K's render() has started resets the
+    // WebGPU swapchain; keeping the scale factor constant makes every _updateCanvasSize
+    // call produce stable dimensions (just re-scaled by the same 0.5 or 1.0 factor).
+    //
+    // Only use half-res when the source is small enough that half-display still upscales:
+    //   480p (854px) source, 1080p display → half-display = 960px > 854px → upscaling ✓
+    //   720p (1280px) source, 1080p display → half-display = 960px < 1280px → full-res
+    const dpr = devicePixelRatio;
+    const displayW = this._player.clientWidth * dpr;
+    const srcW = video.videoWidth; // 0 if metadata not loaded yet → full-res (safe default)
+    this._useHalfRes = srcW > 0 && srcW < displayW / 2;
 
     this._updateCanvasSize();
     this._startResizeObserver();
@@ -215,8 +229,9 @@ class OverlayManager {
     }
   }
 
-  // Updates the canvas pixel buffer size to match the player's current display size.
-  // CSS (position: absolute; inset: 0) handles visual sizing automatically.
+  // Updates the canvas pixel buffer size to match the player's current display size,
+  // scaled by 0.5 when _useHalfRes is true (Option B). The scale factor never changes
+  // after create() so every call produces proportional-but-stable dimensions.
   _updateCanvasSize() {
     const canvas = this._canvas;
     const container = this._player;
@@ -227,8 +242,9 @@ class OverlayManager {
     const h = container.clientHeight;
     if (w === 0 || h === 0) return;
 
-    canvas.width = Math.round(w * dpr);
-    canvas.height = Math.round(h * dpr);
+    const scale = this._useHalfRes ? 0.5 : 1;
+    canvas.width  = Math.round(w * dpr * scale);
+    canvas.height = Math.round(h * dpr * scale);
   }
 
   _startResizeObserver() {
@@ -272,6 +288,8 @@ class FrameProcessor {
     this._perfMonitor = null;
     this._rafId = null;
     this._useRVFC = false;
+    this._lastFrameTime = 0;
+    this._minFrameInterval = 1000 / 12; // Option C: cap WebGL/2D at ~12fps
   }
 
   start(video, pipeline, perfMonitor) {
@@ -319,9 +337,13 @@ class FrameProcessor {
     if (video.paused || video.ended) return;
     if (video.readyState < 2) return; // HAVE_CURRENT_DATA — no frame yet
 
-    const t0 = performance.now();
+    // Option C: throttle WebGL/2D path to ~12fps to save GPU/CPU energy.
+    const now = performance.now();
+    if (now - this._lastFrameTime < this._minFrameInterval) return;
+    this._lastFrameTime = now;
+
     this._pipeline.processFrame();
-    this._perfMonitor.recordFrame(performance.now() - t0);
+    this._perfMonitor.recordFrame(performance.now() - now);
   }
 }
 
@@ -690,6 +712,16 @@ async function _onVideoReady(video, settings) {
   };
   video.addEventListener('loadedmetadata', showRes);
   showRes();
+
+  // Anime4K captures video dimensions once at render() init and uses them for every
+  // copyExternalImageToTexture call. If YouTube's adaptive quality switches the video
+  // to a smaller resolution, the frozen copy rect becomes out-of-bounds and crashes
+  // the GPU pipeline. Re-initializing on resize fixes this.
+  video.addEventListener('resize', () => {
+    if (!_initialized) return;
+    cleanup();
+    setTimeout(() => init(), 150);
+  });
 
   // React to settings changes from the popup.
   _settingsManager.onChange((all, changed) => {

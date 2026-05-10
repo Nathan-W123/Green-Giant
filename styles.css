@@ -7,7 +7,7 @@
   inset: 0;
   pointer-events: none;
   z-index: 10; /* above video container (0-1), below YouTube controls (19+), within #movie_player context */
-  image-rendering: pixelated;
+  image-rendering: auto;
 }
 
 /* ============================================================
