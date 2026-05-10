@@ -24,7 +24,7 @@ try {
   esbuild.buildSync({
     entryPoints: [entry],
     bundle:      true,
-    format:      'iife',
+    format:      'esm',
     outfile:     path.join(dest, 'ort.min.js'),
   });
   const kb = Math.round(fs.statSync(path.join(dest, 'ort.min.js')).size / 1024);
